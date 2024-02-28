@@ -14,6 +14,7 @@
 
     <properties>
         <microprofile-lra-tck.version>2.0</microprofile-lra-tck.version>
+        <lra-coordinator-tag>7.0.0.Final-3.6.6</lra-coordinator-tag>
     </properties>
 
     <build>
@@ -24,6 +25,8 @@
                 <configuration>
                     <skip>false</skip>
                     <systemPropertyVariables>
+						<!-- lra-coordinator tag from https://quay.io/repository/jbosstm/lra-coordinator?tab=tags-->
+						<lra.coordinator.tag>${lra-coordinator-tag}</lra.coordinator.tag>
                         <!-- Disable quarkus optimization -->
                         <quarkus.arc.remove-unused-beans>false</quarkus.arc.remove-unused-beans>
                     </systemPropertyVariables>

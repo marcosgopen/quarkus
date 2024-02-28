@@ -21,7 +21,8 @@ public class LRACoordinatorManager {
             @Observes(precedence = DEFAULT_PRECEDENCE) org.jboss.arquillian.test.spi.event.suite.BeforeSuite event) {
         if (System.getProperty("lra.coordinator.url") == null) {
             LOGGER.debug("Starting LRA coordinator on port " + coordinatorPort);
-            coordinatorContainer = new GenericContainer<>(DockerImageName.parse("quay.io/jbosstm/lra-coordinator:latest"))
+            String dockerTag = System.getProperty("lra.coordinator.tag");
+            coordinatorContainer = new GenericContainer<>(DockerImageName.parse("quay.io/jbosstm/lra-coordinator:" + dockerTag))
                     // lra-coordinator is a Quarkus service
                     .withEnv("QUARKUS_HTTP_PORT", String.valueOf(coordinatorPort))
                     // need to run with host network because coordinator calls the TCK services from the container
