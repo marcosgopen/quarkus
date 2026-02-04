@@ -46,6 +46,12 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-narayana-lra</artifactId>
+            <exclusions>
+            	<exclusion>
+            		<groupId>org.jboss.resteasy</groupId>
+            		<artifactId>resteasy-client</artifactId>
+            	</exclusion>
+            </exclusions>
         </dependency>
         <dependency>
             <groupId>io.quarkus</groupId>
@@ -58,8 +64,17 @@
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-resteasy-client</artifactId>
+            <exclusions>
+            	<exclusion>
+            		<groupId>org.jboss.resteasy</groupId>
+            		<artifactId>resteasy-client</artifactId>
+            	</exclusion>
+            </exclusions>
         </dependency>
-
+<dependency>        
+    		<groupId>org.jboss.resteasy</groupId>
+            		<artifactId>resteasy-client</artifactId>
+            		</dependency>
         <dependency>
             <groupId>org.eclipse.microprofile.lra</groupId>
             <artifactId>microprofile-lra-tck</artifactId>

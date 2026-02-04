@@ -59,28 +59,34 @@ public class NarayanaLRARecovery implements LRARecoveryService {
     @Override
     public void waitForCallbacks(URI lraId) {
         log.trace("waitForCallbacks for: " + lraId.toASCIIString());
-        try (Client client = ClientBuilder.newClient()) {
-            try {
-                await().atMost(Duration.ofMillis(WAIT_CALLBACK_TIMEOUT)).catchUncaughtExceptions()
-                        .until(() -> {
-                            try {
-                                WebTarget target;
+        ClassLoader oldCl = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
+            try (Client client = ClientBuilder.newClient()) {
+                try {
+                    await().atMost(Duration.ofMillis(WAIT_CALLBACK_TIMEOUT)).catchUncaughtExceptions()
+                            .until(() -> {
                                 try {
-                                    target = client.target(lraId);
-                                } catch (Exception | Error e) {
-                                    // Some TCK tests don't start Quarkus application, so we can't create REST request
-                                    return false;
+                                    WebTarget target;
+                                    try {
+                                        target = client.target(lraId);
+                                    } catch (Exception | Error e) {
+                                        // Some TCK tests don't start Quarkus application, so we can't create REST request
+                                        return false;
+                                    }
+                                    target.request().get();
+                                } catch (NotFoundException notFoundException) {
+                                    // LRA not found means it has been finished
+                                    return true;
                                 }
-                                target.request().get();
-                            } catch (NotFoundException notFoundException) {
-                                // LRA not found means it has been finished
-                                return true;
-                            }
-                            return false;
-                        });
-            } catch (ConditionTimeoutException e) {
-                log.info("waitForCallbacks timeout (OK, optimization): " + e.getMessage());
+                                return false;
+                            });
+                } catch (ConditionTimeoutException e) {
+                    log.info("waitForCallbacks timeout (OK, optimization): " + e.getMessage());
+                }
             }
+        } finally {
+            Thread.currentThread().setContextClassLoader(oldCl);
         }
     }
 
@@ -88,15 +94,21 @@ public class NarayanaLRARecovery implements LRARecoveryService {
     public boolean waitForEndPhaseReplay(URI lraId) {
         log.info("waitForEndPhaseReplay for: " + lraId.toASCIIString());
 
-        try (Client client = ClientBuilder.newClient()) {
-            URI lraCoordinatorUri = LRAConstants.getLRACoordinatorUrl(lraId);
-            URI recoveryCoordinatorUri = UriBuilder.fromUri(lraCoordinatorUri)
-                    .path(RECOVERY_COORDINATOR_PATH_NAME).build();
+        ClassLoader oldCl = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
+            try (Client client = ClientBuilder.newClient()) {
+                URI lraCoordinatorUri = LRAConstants.getLRACoordinatorUrl(lraId);
+                URI recoveryCoordinatorUri = UriBuilder.fromUri(lraCoordinatorUri)
+                        .path(RECOVERY_COORDINATOR_PATH_NAME).build();
 
-            String recoveryJson = getResponse(recoveryCoordinatorUri, client);
-            String mainJson = getResponse(lraCoordinatorUri, client);
+                String recoveryJson = getResponse(recoveryCoordinatorUri, client);
+                String mainJson = getResponse(lraCoordinatorUri, client);
 
-            return !recoveryJson.contains(lraId.toASCIIString()) && !mainJson.contains(lraId.toASCIIString());
+                return !recoveryJson.contains(lraId.toASCIIString()) && !mainJson.contains(lraId.toASCIIString());
+            }
+        } finally {
+            Thread.currentThread().setContextClassLoader(oldCl);
         }
     }
 
