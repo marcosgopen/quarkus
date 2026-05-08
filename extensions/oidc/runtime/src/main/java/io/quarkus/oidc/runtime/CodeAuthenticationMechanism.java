@@ -564,19 +564,19 @@ public class CodeAuthenticationMechanism extends AbstractOidcAuthenticationMecha
             }
 
             String idTokenIss = idTokenJson.getString(Claims.iss.name());
-            String logoutTokenIss = backChannelLogoutTokenResult.localVerificationResult.getString(Claims.iss.name());
+            String logoutTokenIss = backChannelLogoutTokenResult.localVerificationResult().getString(Claims.iss.name());
             if (logoutTokenIss != null && !logoutTokenIss.equals(idTokenIss)) {
                 LOG.debugf("Logout token issuer does not match the ID token issuer");
                 return false;
             }
             String idTokenSub = idTokenJson.getString(Claims.sub.name());
-            String logoutTokenSub = backChannelLogoutTokenResult.localVerificationResult.getString(Claims.sub.name());
+            String logoutTokenSub = backChannelLogoutTokenResult.localVerificationResult().getString(Claims.sub.name());
             if (logoutTokenSub != null && idTokenSub != null && !logoutTokenSub.equals(idTokenSub)) {
                 LOG.debugf("Logout token subject does not match the ID token subject");
                 return false;
             }
             String idTokenSid = idTokenJson.getString(OidcConstants.ID_TOKEN_SID_CLAIM);
-            String logoutTokenSid = backChannelLogoutTokenResult.localVerificationResult
+            String logoutTokenSid = backChannelLogoutTokenResult.localVerificationResult()
                     .getString(OidcConstants.BACK_CHANNEL_LOGOUT_SID_CLAIM);
             if (logoutTokenSid != null && idTokenSid != null && !logoutTokenSid.equals(idTokenSid)) {
                 LOG.debugf("Logout token session id does not match the ID token session id");
@@ -695,7 +695,15 @@ public class CodeAuthenticationMechanism extends AbstractOidcAuthenticationMecha
                         if (!shouldAutoRedirect(configContext, context)) {
                             // If the client (usually an SPA) wants to handle the redirect manually, then
                             // return status code 499 and WWW-Authenticate header with the 'OIDC' value.
-                            return Uni.createFrom().item(new ChallengeData(499, "WWW-Authenticate", "OIDC"));
+                            ChallengeData challenge = null;
+                            JavaScriptRequestChecker checker = resolver.getJavaScriptRequestChecker();
+                            if (checker != null) {
+                                challenge = checker.getChallenge(context);
+                            }
+                            if (challenge == null) {
+                                challenge = new ChallengeData(499, "WWW-Authenticate", "OIDC");
+                            }
+                            return Uni.createFrom().item(challenge);
                         }
 
                         StringBuilder codeFlowParams = new StringBuilder(168); // experimentally determined to be a good size for preventing resizing and not wasting space

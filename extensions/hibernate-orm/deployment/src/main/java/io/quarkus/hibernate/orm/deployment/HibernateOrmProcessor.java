@@ -169,6 +169,7 @@ import net.bytebuddy.dynamic.DynamicType;
 import net.bytebuddy.pool.TypePool;
 import net.bytebuddy.pool.TypePool.CacheProvider;
 import net.bytebuddy.pool.TypePool.Default.ReaderMode;
+import net.bytebuddy.utility.GraalImageCode;
 
 /**
  * Simulacrum of JPA bootstrap.
@@ -195,6 +196,14 @@ public final class HibernateOrmProcessor {
 
     private static final String JAKARTA_DATA_REPOSITORY_ANNOTATION = "jakarta.data.repository.Repository";
 
+    static {
+        // configure ByteBuddy for build reproducibility
+        // while it looks like the property is related to GraalVM,
+        // it actually needs to be set for reproducible builds it NOT using GraalVM
+        // see https://github.com/raphw/byte-buddy/commit/9b4690956dd049373a0c9fa548f74a16557cf3c0
+        System.setProperty(GraalImageCode.REPRODUCIBLE_PROPERTIES, "true");
+    }
+
     @BuildStep
     NativeImageFeatureBuildItem registerServicesForReflection(BuildProducer<ServiceProviderBuildItem> services) {
         for (DotName serviceProvider : ClassNames.SERVICE_PROVIDERS) {
@@ -204,7 +213,7 @@ public final class HibernateOrmProcessor {
         return new NativeImageFeatureBuildItem(RegisterServicesForReflectionFeature.class);
     }
 
-    @BuildStep(onlyIf = NativeOrNativeSourcesBuild.class)
+    @BuildStep
     void registerStrategyForReflection(
             BuildProducer<ReflectiveClassBuildItem> reflective) {
 
@@ -417,7 +426,7 @@ public final class HibernateOrmProcessor {
                             true, isHibernateValidatorPresent(capabilities), jsonMapper, xmlMapper));
         }
 
-        if (impliedPU.shouldGenerateImpliedBlockingPersistenceUnit()) {
+        if (persistenceXmlDescriptors.isEmpty() && impliedPU.shouldGenerateImpliedBlockingPersistenceUnit()) {
             handleHibernateORMWithNoPersistenceXml(hibernateOrmConfig, index, persistenceXmlDescriptors,
                     jdbcDataSources, reactiveDataSources, applicationArchivesBuildItem, launchMode.getLaunchMode(),
                     additionalJpaModelBuildItems,
@@ -467,7 +476,31 @@ public final class HibernateOrmProcessor {
     @BuildStep
     public void contributeQuarkusConfigToJpaModel(
             BuildProducer<JpaModelPersistenceUnitContributionBuildItem> jpaModelPuContributions,
-            HibernateOrmConfig hibernateOrmConfig) {
+            HibernateOrmConfig hibernateOrmConfig, List<PersistenceXmlDescriptorBuildItem> persistenceXmlDescriptors) {
+        if (!persistenceXmlDescriptors.isEmpty()) {
+            if (hibernateOrmConfig.isAnyNonPersistenceXmlPropertySet()) {
+                throw new ConfigurationException(
+                        "A legacy persistence.xml file is present in the classpath, but Hibernate ORM is also configured through the Quarkus config file.\n"
+                                + "Legacy persistence.xml files and Quarkus configuration cannot be used at the same time.\n"
+                                + "To ignore persistence.xml files, set the configuration property"
+                                + " 'quarkus.hibernate-orm.persistence-xml.ignore' to 'true'.\n"
+                                + "To use persistence.xml files, remove all '" + HIBERNATE_ORM_CONFIG_PREFIX
+                                + "*' properties from the Quarkus config file.");
+            } else {
+                // It's theoretically possible to use the Quarkus Hibernate ORM extension
+                // without setting any build-time configuration property,
+                // so the condition above might not catch all attempts to use persistence.xml and Quarkus-configured PUs
+                // at the same time.
+                // At that point, the only thing we can do is log something,
+                // so that hopefully people in that situation will notice that their Quarkus configuration is being ignored.
+                LOG.infof(
+                        "A legacy persistence.xml file is present in the classpath. This file will be used to configure JPA/Hibernate ORM persistence units,"
+                                + " and any configuration of the Hibernate ORM extension will be ignored."
+                                + " To ignore persistence.xml files instead, set the configuration property"
+                                + " 'quarkus.hibernate-orm.persistence-xml.ignore' to 'true'.");
+                return;
+            }
+        }
         for (Entry<String, HibernateOrmConfigPersistenceUnit> entry : hibernateOrmConfig.persistenceUnits()
                 .entrySet()) {
             String name = entry.getKey();
@@ -524,6 +557,11 @@ public final class HibernateOrmProcessor {
             managedClassAndPackageNames.add(additionalJpaModelBuildItem.getClassName());
         }
 
+        // Remove package names: only actual class names should be passed to generateProxies,
+        // because attempting to look up a package name via IndexWrapper.getClassByName()
+        // triggers a spurious "Failed to index" warning.
+        managedClassAndPackageNames.removeAll(jpaModel.getAllModelPackageNames());
+
         PreGeneratedProxies proxyDefinitions = generateProxies(managedClassAndPackageNames,
                 indexBuildItem.getIndex(), transformedClassesBuildItem,
                 generatedClassBuildItemBuildProducer, liveReloadBuildItem, buildExecutor);
@@ -549,7 +587,7 @@ public final class HibernateOrmProcessor {
         return new BytecodeRecorderConstantDefinitionBuildItem(PreGeneratedProxies.class, proxyDefinitions);
     }
 
-    @BuildStep(onlyIf = NativeOrNativeSourcesBuild.class)
+    @BuildStep
     public void preGenAnnotationProxies(List<PersistenceUnitDescriptorBuildItem> persistenceUnitDescriptorBuildItems,
             BuildProducer<ReflectiveClassBuildItem> reflective,
             BuildProducer<NativeImageProxyDefinitionBuildItem> proxyDefinitions) {
@@ -836,7 +874,7 @@ public final class HibernateOrmProcessor {
         }
     }
 
-    @BuildStep(onlyIf = NativeOrNativeSourcesBuild.class)
+    @BuildStep
     public void registerStaticMetamodelClassesForReflection(CombinedIndexBuildItem index,
             BuildProducer<ReflectiveClassBuildItem> reflective) {
         Collection<AnnotationInstance> annotationInstances = index.getIndex().getAnnotations(ClassNames.STATIC_METAMODEL);
@@ -856,7 +894,7 @@ public final class HibernateOrmProcessor {
      * Enable reflection for methods annotated with @InjectService,
      * such as org.hibernate.engine.jdbc.cursor.internal.StandardRefCursorSupport.injectJdbcServices.
      */
-    @BuildStep(onlyIf = NativeOrNativeSourcesBuild.class)
+    @BuildStep
     public void registerInjectServiceMethodsForReflection(CombinedIndexBuildItem index,
             BuildProducer<ReflectiveClassBuildItem> reflective) {
         Set<String> classes = new HashSet<>();
@@ -963,31 +1001,6 @@ public final class HibernateOrmProcessor {
             BuildProducer<ReflectiveMethodBuildItem> reflectiveMethods,
             BuildProducer<UnremovableBeanBuildItem> unremovableBeans,
             List<DatabaseKindDialectBuildItem> dbKindMetadataBuildItems) {
-        if (!descriptors.isEmpty()) {
-            if (hibernateOrmConfig.isAnyNonPersistenceXmlPropertySet()) {
-                throw new ConfigurationException(
-                        "A legacy persistence.xml file is present in the classpath, but Hibernate ORM is also configured through the Quarkus config file.\n"
-                                + "Legacy persistence.xml files and Quarkus configuration cannot be used at the same time.\n"
-                                + "To ignore persistence.xml files, set the configuration property"
-                                + " 'quarkus.hibernate-orm.persistence-xml.ignore' to 'true'.\n"
-                                + "To use persistence.xml files, remove all '" + HIBERNATE_ORM_CONFIG_PREFIX
-                                + "*' properties from the Quarkus config file.");
-            } else {
-                // It's theoretically possible to use the Quarkus Hibernate ORM extension
-                // without setting any build-time configuration property,
-                // so the condition above might not catch all attempts to use persistence.xml and Quarkus-configured PUs
-                // at the same time.
-                // At that point, the only thing we can do is log something,
-                // so that hopefully people in that situation will notice that their Quarkus configuration is being ignored.
-                LOG.infof(
-                        "A legacy persistence.xml file is present in the classpath. This file will be used to configure JPA/Hibernate ORM persistence units,"
-                                + " and any configuration of the Hibernate ORM extension will be ignored."
-                                + " To ignore persistence.xml files instead, set the configuration property"
-                                + " 'quarkus.hibernate-orm.persistence-xml.ignore' to 'true'.");
-                return;
-            }
-        }
-
         if (!hibernateOrmConfig.blocking()) {
             LOG.infof(
                     "Hibernate ORM was disabled explicitly by quarkus.hibernate-orm.blocking=false");
@@ -1519,13 +1532,13 @@ public final class HibernateOrmProcessor {
      */
     public static QuarkusScanner buildQuarkusScanner(JpaModelBuildItem jpaModel) {
         QuarkusScanner scanner = new QuarkusScanner();
-        Set<PackageDescriptor> packageDescriptors = new HashSet<>();
+        Set<PackageDescriptor> packageDescriptors = new LinkedHashSet<>();
         for (String packageName : jpaModel.getAllModelPackageNames()) {
             QuarkusScanner.PackageDescriptorImpl desc = new QuarkusScanner.PackageDescriptorImpl(packageName);
             packageDescriptors.add(desc);
         }
         scanner.setPackageDescriptors(packageDescriptors);
-        Set<ClassDescriptor> classDescriptors = new HashSet<>();
+        Set<ClassDescriptor> classDescriptors = new LinkedHashSet<>();
         for (String className : jpaModel.getEntityClassNames()) {
             QuarkusScanner.ClassDescriptorImpl desc = new QuarkusScanner.ClassDescriptorImpl(className,
                     ClassDescriptor.Categorization.MODEL);

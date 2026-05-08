@@ -1,7 +1,9 @@
 package io.quarkus.resteasy.reactive.jackson.deployment.test;
 
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -9,6 +11,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.hamcrest.CoreMatchers;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
@@ -483,6 +486,18 @@ public abstract class AbstractSimpleJsonTest {
     }
 
     @Test
+    public void testMultiGenericInput() {
+        RestAssured
+                .with()
+                .body("{\"first\": {\"name\":\"foo\", \"email\":\"bar\"}, \"second\": {\"category\":\"test\", \"value\":42}}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/multiGenericInput")
+                .then()
+                .statusCode(200)
+                .body(is("foo/test/42"));
+    }
+
+    @Test
     public void testInterface() {
         RestAssured
                 .with()
@@ -671,6 +686,42 @@ public abstract class AbstractSimpleJsonTest {
     }
 
     @Test
+    public void testEchoPut() {
+        RestAssured
+                .with()
+                .body("{\"publicName\":\"Leo\",\"veterinarian\":{\"name\":\"Dolittle\"},\"age\":5,\"vaccinated\":true}")
+                .contentType("application/json; charset=utf-8")
+                .put("/simple/dog-echo-put")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("publicName", Matchers.is("Leo"))
+                .body("privateName", Matchers.nullValue())
+                .body("age", Matchers.is(5))
+                .body("vaccinated", Matchers.is(true))
+                .body("veterinarian.name", Matchers.is("Dolittle"))
+                .body("veterinarian.title", Matchers.nullValue());
+    }
+
+    @Test
+    public void testEchoPatch() {
+        RestAssured
+                .with()
+                .body("{\"publicName\":\"Leo\",\"veterinarian\":{\"name\":\"Dolittle\"},\"age\":5,\"vaccinated\":true}")
+                .contentType("application/json; charset=utf-8")
+                .patch("/simple/dog-echo-patch")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("publicName", Matchers.is("Leo"))
+                .body("privateName", Matchers.nullValue())
+                .body("age", Matchers.is(5))
+                .body("vaccinated", Matchers.is(true))
+                .body("veterinarian.name", Matchers.is("Dolittle"))
+                .body("veterinarian.title", Matchers.nullValue());
+    }
+
+    @Test
     public void testEchoWithNullString() {
         RestAssured
                 .with()
@@ -726,6 +777,33 @@ public abstract class AbstractSimpleJsonTest {
         // assert that the "is_enabled" field is present only once in the response
         assertTrue(first >= 0);
         assertEquals(first, last);
+    }
+
+    @Test
+    public void testJsonAliasRecordEcho() {
+        // Test that @JsonAlias is respected when using the alias name
+        RestAssured
+                .with()
+                .body("{\"name\":\"John\",\"insurance_number\":\"INS-123\"}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/json-alias-record-echo")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("name", Matchers.is("John"))
+                .body("insuranceNumber", Matchers.is("INS-123"));
+
+        // Test that the original field name also still works
+        RestAssured
+                .with()
+                .body("{\"name\":\"Jane\",\"insuranceNumber\":\"INS-456\"}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/json-alias-record-echo")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("name", Matchers.is("Jane"))
+                .body("insuranceNumber", Matchers.is("INS-456"));
     }
 
     @Test
@@ -877,6 +955,90 @@ public abstract class AbstractSimpleJsonTest {
     }
 
     @Test
+    public void testProductPriceValid() {
+        RestAssured
+                .with()
+                .body("{\"name\":\"Widget\",\"price\":42}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/product-price")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("name", Matchers.is("Widget"))
+                .body("price", Matchers.is(42));
+    }
+
+    @Test
+    public void testProductPriceInvalidType() {
+        // Sending a string where an Integer is expected must return 400, not silently coerce
+        RestAssured
+                .with()
+                .body("{\"name\":\"Widget\",\"price\":\"expensive\"}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/product-price")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    public void testProductPriceInvalidTypePut() {
+        RestAssured
+                .with()
+                .body("{\"name\":\"Widget\",\"price\":\"expensive\"}")
+                .contentType("application/json; charset=utf-8")
+                .put("/simple/product-price")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    public void testOptionalFieldDeserialization() {
+        // Optional<Score> must be deserialized to Optional<Score>, not Optional<LinkedHashMap>.
+        // The endpoint calls Score::getCategory to verify the actual type at runtime.
+        RestAssured
+                .with()
+                .body("{\"name\":\"hello\",\"count\":42,\"score\":{\"category\":\"A\",\"value\":10}}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/optional-holder")
+                .then()
+                .statusCode(200)
+                .body("name", is("hello"),
+                        "count", is(42),
+                        "scoreCategory", is("A"));
+    }
+
+    @Test
+    public void testOptionalFieldWithNull() {
+        // Explicit null should result in null (Optional.empty() serializes as null)
+        RestAssured
+                .with()
+                .body("{\"name\":null,\"count\":null}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/optional-holder")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("name", is(nullValue()),
+                        "count", is(nullValue()));
+    }
+
+    @Test
+    public void testExplicitNullOverridesDefaultValue() {
+        // When a field has a non-null default value (e.g. mode = "auto"),
+        // sending an explicit null must override it to null, not preserve the default
+        RestAssured
+                .with()
+                .body("{\"mode\":null,\"label\":\"test\"}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/default-value-holder")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("mode", is(nullValue()),
+                        "label", is("test"));
+    }
+
+    @Test
     public void testPrimitiveTypesBean() {
         RestAssured
                 .with()
@@ -1016,5 +1178,116 @@ public abstract class AbstractSimpleJsonTest {
                 .body("doubleInstance", Matchers.nullValue())
                 .body("booleanPrimitive", Matchers.equalTo(false))
                 .body("booleanInstance", Matchers.nullValue());
+    }
+
+    @Test
+    void testShouldDeserializePolymorphicItems() {
+        RestAssured
+                .with()
+                .body("{\"items\": [{\"name\": \"world\"}]}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/linkedlist-batch")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("values", CoreMatchers.is("world"));
+    }
+
+    @Test
+    void testShouldDeserializeAbstractList() {
+        RestAssured
+                .with()
+                .body("{\"items\": [{\"name\": \"world\"}]}")
+                .contentType("application/json; charset=utf-8")
+                .post("/simple/deque-batch")
+                .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("values", CoreMatchers.is("world"));
+    }
+
+    @Test
+    void testShouldRejectUnknownFields() {
+        RestAssured
+                .with()
+                .body("{\"name\": \"world\", \"evil\": \"data\"}")
+                .contentType("application/json")
+                .post("/simple/greeting")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    void naming_annotationUpperSnake_shouldDeserialize() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"FIRST_NAME": "Bob"}
+                        """)
+                .when()
+                .post("/simple/annotation-naming")
+                .then()
+                .statusCode(200)
+                .body("values", CoreMatchers.is("Bob"));
+    }
+
+    @Test
+    void naming_annotationUpperSnake_shouldSerialize() {
+        given()
+                .when()
+                .get("/simple/annotation-naming-ser")
+                .then()
+                .statusCode(200)
+                .body("FIRST_NAME", CoreMatchers.is("Bob"));
+    }
+
+    @Test
+    void anySetter_shouldCaptureUnknownFields() {
+        given()
+                .contentType("application/json")
+                .body("""
+                        {"known": "x", "extra1": "y", "extra2": "z"}
+                        """)
+                .when()
+                .post("/simple/any-setter")
+                .then()
+                .statusCode(200)
+                .body("known", CoreMatchers.is("x"))
+                .body("extras_size", CoreMatchers.is(2));
+    }
+
+    @Test
+    void unwrapped_failedResult_shouldFlattenFieldsWithDiscriminator() {
+        given()
+                .when()
+                .get("/simple/unwrapped-result")
+                .then()
+                .statusCode(200)
+                .body("results[1].status", CoreMatchers.is("failed"))
+                .body("results[1].code", CoreMatchers.is("E001"))
+                .body("results[1].message", CoreMatchers.is("something went wrong"))
+                .body("results[1]", CoreMatchers.not(hasKey("error")));
+    }
+
+    @Test
+    void polymorphicItem_shouldIncludeTypeDiscriminator() {
+        given()
+                .when()
+                .get("/simple/polymorphic-item-ser")
+                .then()
+                .statusCode(200)
+                .body("item.type", CoreMatchers.is("type_a"))
+                .body("item.value", CoreMatchers.is("hello"));
+    }
+
+    @Test
+    void sensor_metadata_shouldDeserialize() {
+        given()
+                .when()
+                .get("/simple/sensor-metadata")
+                .then()
+                .statusCode(200)
+                .body("metadata.CPU.description", CoreMatchers.is("CPU Power"))
+                .body("documentation", CoreMatchers.is("macOS powermetrics derived information"));
     }
 }

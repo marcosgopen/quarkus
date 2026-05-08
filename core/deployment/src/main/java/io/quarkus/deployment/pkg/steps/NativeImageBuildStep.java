@@ -42,6 +42,8 @@ import io.quarkus.deployment.configuration.NativeConfigUtils;
 import io.quarkus.deployment.pkg.NativeConfig;
 import io.quarkus.deployment.pkg.PackageConfig;
 import io.quarkus.deployment.pkg.builditem.ArtifactResultBuildItem;
+import io.quarkus.deployment.pkg.builditem.BuildPgoOptimizedNativeRequestBuildItem;
+import io.quarkus.deployment.pkg.builditem.BuildPgoOptimizedNativeResultBuildItem;
 import io.quarkus.deployment.pkg.builditem.BuildSystemTargetBuildItem;
 import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
 import io.quarkus.deployment.pkg.builditem.NativeImageBuildItem;
@@ -56,7 +58,9 @@ import io.quarkus.deployment.steps.NativeImageFeatureStep;
 import io.quarkus.maven.dependency.ResolvedDependency;
 import io.quarkus.runtime.LocalesBuildTimeConfig;
 import io.quarkus.runtime.graal.DisableLoggingFeature;
+import io.quarkus.runtime.graal.GraalVM.Distribution;
 import io.quarkus.runtime.graal.JVMChecksFeature;
+import io.quarkus.runtime.graal.SkipConsoleServiceProvidersFeature;
 import io.quarkus.sbom.ApplicationComponent;
 import io.quarkus.sbom.ApplicationManifestConfig;
 import io.smallrye.common.cpu.CPU;
@@ -88,11 +92,14 @@ public class NativeImageBuildStep {
     public static final String APP_SOURCES = "app-sources";
     public static final String ARTIFACT_RESULT_TYPE = "native";
 
-    @BuildStep(onlyIf = NativeOrNativeSourcesBuild.class)
-    void nativeImageFeatures(BuildProducer<NativeImageFeatureBuildItem> features) {
+    @BuildStep
+    void nativeImageFeatures(BuildProducer<NativeImageFeatureBuildItem> features, NativeConfig nativeConfig) {
         features.produce(new NativeImageFeatureBuildItem(NativeImageFeatureStep.GRAAL_FEATURE));
         features.produce(new NativeImageFeatureBuildItem(DisableLoggingFeature.class));
         features.produce(new NativeImageFeatureBuildItem(JVMChecksFeature.class));
+        if (!nativeConfig.autoServiceLoaderRegistration()) {
+            features.produce(new NativeImageFeatureBuildItem(SkipConsoleServiceProvidersFeature.class));
+        }
     }
 
     @BuildStep(onlyIf = NativeBuild.class)
@@ -104,6 +111,7 @@ public class NativeImageBuildStep {
                 ApplicationManifestConfig.builder()
                         .setApplicationModel(curateOutcomeBuildItem.getApplicationModel())
                         .setMainComponent(ApplicationComponent.builder()
+                                .setVersion(curateOutcomeBuildItem.getApplicationModel().getAppArtifact().getVersion())
                                 .setPath(image.getPath())
                                 .setDependencies(List.of(curateOutcomeBuildItem.getApplicationModel().getAppArtifact())))
                         .setRunnerPath(image.getPath())
@@ -184,6 +192,7 @@ public class NativeImageBuildStep {
                 ApplicationManifestConfig.builder()
                         .setApplicationModel(curateOutcomeBuildItem.getApplicationModel())
                         .setMainComponent(ApplicationComponent.builder()
+                                .setVersion(curateOutcomeBuildItem.getApplicationModel().getAppArtifact().getVersion())
                                 .setPath(nativeImageSourceJarBuildItem.getPath())
                                 .setResolvedDependency(curateOutcomeBuildItem.getApplicationModel().getAppArtifact()))
                         .setRunnerPath(nativeImageSourceJarBuildItem.getPath())
@@ -279,6 +288,17 @@ public class NativeImageBuildStep {
                     .build();
 
             List<String> nativeImageArgs = commandAndExecutable.args;
+
+            if (nativeConfig.pgo().enabled()) {
+                Path pgoArgsFile = outputTargetBuildItem.getOutputDirectory().resolve("native-image-pgo-args.txt");
+                Path pgoOutputDirFile = outputTargetBuildItem.getOutputDirectory().resolve("native-image-pgo-outputdir.txt");
+                try {
+                    Files.write(pgoArgsFile, commandAndExecutable.getArgs());
+                    Files.writeString(pgoOutputDirFile, outputDir.toAbsolutePath().toString());
+                } catch (IOException e) {
+                    throw new UncheckedIOException("Unable to save PGO args file", e);
+                }
+            }
 
             try {
                 buildRunner.build(nativeImageArgs,
@@ -415,6 +435,93 @@ public class NativeImageBuildStep {
                 "quarkus.native.container-runtime-options"
         }) {
             producer.produce(new SuppressNonRuntimeConfigChangedWarningBuildItem(propertyKey));
+        }
+    }
+
+    @BuildStep
+    public BuildPgoOptimizedNativeResultBuildItem buildPgoOptimizedNative(
+            BuildPgoOptimizedNativeRequestBuildItem request,
+            OutputTargetBuildItem outputTargetBuildItem,
+            NativeConfig nativeConfig) {
+        Path profilePath = request.getProfilePath();
+        Path targetDir = outputTargetBuildItem.getOutputDirectory();
+        Path argsFile = targetDir.resolve("native-image-pgo-args.txt");
+        Path outputDirFile = targetDir.resolve("native-image-pgo-outputdir.txt");
+
+        if (!Files.exists(argsFile)) {
+            throw new RuntimeException("PGO args file not found at " + argsFile
+                    + ". Was the instrumented native build run with quarkus.native.pgo.enabled=true?");
+        }
+
+        // The native-image process must run in the same directory as the original build,
+        // because the saved args reference the runner JAR by filename only.
+        Path outputDir;
+        try {
+            outputDir = Path.of(Files.readString(outputDirFile).trim());
+        } catch (IOException e) {
+            throw new RuntimeException("PGO output directory file not found at " + outputDirFile
+                    + ". Was the instrumented native build run with quarkus.native.pgo.enabled=true?", e);
+        }
+
+        try {
+            List<String> originalArgs = Files.readAllLines(argsFile);
+
+            // Replace --pgo-instrument with --pgo=<profile>
+            List<String> pgoArgs = new ArrayList<>();
+            for (String arg : originalArgs) {
+                if ("--pgo-instrument".equals(arg)) {
+                    pgoArgs.add("--pgo=" + profilePath.toAbsolutePath());
+                } else {
+                    pgoArgs.add(arg);
+                }
+            }
+
+            // Find native image name: the arg right before "-jar"
+            String nativeImageName = null;
+            for (int i = 0; i < pgoArgs.size() - 1; i++) {
+                if ("-jar".equals(pgoArgs.get(i + 1))) {
+                    nativeImageName = pgoArgs.get(i);
+                    break;
+                }
+            }
+
+            if (nativeImageName == null) {
+                throw new RuntimeException("Could not determine native image name from saved args");
+            }
+
+            String resultingExecutableName = nativeImageName;
+            if (OS.current() == OS.WINDOWS) {
+                resultingExecutableName = resultingExecutableName + ".exe";
+            }
+
+            // Rename the existing instrumented binary (located in targetDir, where the original build copied it)
+            Path existingBinary = targetDir.resolve(resultingExecutableName);
+            if (Files.exists(existingBinary)) {
+                Path instrumentedBinary = targetDir.resolve(resultingExecutableName + ".instrumented");
+                log.infof("Renaming instrumented binary to %s", instrumentedBinary.getFileName());
+                Files.move(existingBinary, instrumentedBinary, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            // Find native-image executable and rebuild
+            NativeImageBuildLocalRunner localRunner = getNativeImageBuildLocalRunner(nativeConfig);
+            if (localRunner == null) {
+                throw new RuntimeException("Cannot find native-image executable for PGO rebuild");
+            }
+
+            log.info("Rebuilding native image with PGO profile...");
+            localRunner.build(pgoArgs, nativeImageName, resultingExecutableName, outputDir,
+                    null, nativeConfig.debug().enabled(), false);
+
+            // Copy the optimized binary from outputDir to targetDir (same as the original build flow)
+            Path generatedBinary = outputDir.resolve(resultingExecutableName);
+            Path finalBinary = targetDir.resolve(resultingExecutableName);
+            IoUtils.copy(generatedBinary, finalBinary);
+            Files.delete(generatedBinary);
+            log.infof("PGO-optimized native image built: %s", finalBinary);
+
+            return new BuildPgoOptimizedNativeResultBuildItem(finalBinary);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build PGO-optimized native image", e);
         }
     }
 
@@ -776,7 +883,6 @@ public class NativeImageBuildStep {
                     featuresList.add(nativeImageFeature.getQualifiedName());
                 }
                 if (!nativeConfig.autoServiceLoaderRegistration()) {
-                    featuresList.add("io.quarkus.runtime.graal.SkipConsoleServiceProvidersFeature");
                     // required by the feature
                     nativeImageArgs.add("-J--add-exports=org.graalvm.nativeimage.builder/com.oracle.svm.core.jdk=ALL-UNNAMED");
                 }
@@ -846,6 +952,16 @@ public class NativeImageBuildStep {
                  * a parameter to be overridable through quarkus.native.additional-build-args or
                  * quarkus.native.additional-build-args-append please make sure to add it before this call.
                  */
+                if (nativeConfig.pgo().enabled()) {
+                    if (graalVMVersion.getDistribution() != Distribution.ORACLE) {
+                        throw new RuntimeException(
+                                "Profile-Guided Optimization (PGO) requires Oracle GraalVM. " +
+                                        "Detected distribution: " + graalVMVersion.getDistribution() + ". " +
+                                        "Please use Oracle GraalVM or disable PGO with quarkus.native.pgo.enabled=false");
+                    }
+                    nativeImageArgs.add("--pgo-instrument");
+                }
+
                 handleAdditionalProperties(nativeImageArgs);
 
                 addExperimentalVMOption(nativeImageArgs, "-H:+AllowFoldMethods");

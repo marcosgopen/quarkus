@@ -38,9 +38,11 @@ nb-configuration.xml
 .jekyll-cache
 .mvn/.develocity
 .mvn/.gradle-enterprise/
-.quarkus
-
-.goosehints
 .goose
 .claude
+.bob
 **/.claude
+.quarkus
+
+CLAUDE.local.md
+docs/superpowers

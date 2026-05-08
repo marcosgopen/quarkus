@@ -36,7 +36,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <!-- These properties are used by CreateProjectMojo to add the Maven Wrapper -->
-        <proposed-maven-version>3.9.12</proposed-maven-version>
+        <proposed-maven-version>3.9.15</proposed-maven-version>
         <maven-wrapper.version>3.3.4</maven-wrapper.version>
         <!-- When updating gradle-wrapper.version, make sure to also update files in
              independent-projects/tools/base-codestarts/src/main/resources/codestarts
@@ -51,11 +51,11 @@
 
         <!-- Versions -->
         <assertj.version>3.27.7</assertj.version>
-        <jackson-bom.version>2.21.1</jackson-bom.version>
+        <jackson-bom.version>2.21.2</jackson-bom.version>
         <jakarta.enterprise.cdi-api.version>4.1.0</jakarta.enterprise.cdi-api.version>
         <junit.version>6.0.3</junit.version>
         <commons-compress.version>1.28.0</commons-compress.version>
-        <jboss-logging.version>3.6.2.Final</jboss-logging.version>
+        <jboss-logging.version>3.6.3.Final</jboss-logging.version>
         <mockito.version>5.21.0</mockito.version>
         <quarkus.version>${project.version}</quarkus.version>
         <maven-model-helper.version>41</maven-model-helper.version>
@@ -71,7 +71,6 @@
         <module>codestarts</module>
         <module>base-codestarts</module>
         <module>devtools-common</module>
-        <module>utilities</module>
         <module>analytics-common</module>
     </modules>
     <dependencyManagement>
@@ -140,11 +139,6 @@
             <dependency>
                 <groupId>io.quarkus</groupId>
                 <artifactId>quarkus-devtools-message-writer</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>io.quarkus</groupId>
-                <artifactId>quarkus-devtools-utilities</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

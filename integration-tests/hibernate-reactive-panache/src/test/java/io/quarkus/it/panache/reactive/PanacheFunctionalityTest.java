@@ -58,6 +58,7 @@ public class PanacheFunctionalityTest {
         RestAssured.when().get("/test/projection-constructor-annotation").then().body(is("OK"));
         RestAssured.when().get("/test/projection-projected-field-name").then().body(is("OK"));
         RestAssured.when().get("/test/projection-no-arguments-constructor").then().body(is("OK"));
+        RestAssured.when().get("/test/projection-aggregate-function").then().body(is("OK"));
         RestAssured.when().get("/test/model3").then().body(is("OK"));
     }
 
@@ -160,6 +161,11 @@ public class PanacheFunctionalityTest {
     @Test
     public void testSortByNullPrecedence() {
         RestAssured.when().get("/test/testSortByNullPrecedence").then().body(is("OK"));
+    }
+
+    @Test
+    public void testCaseInsensitiveSorting() {
+        RestAssured.when().get("/test/testCaseInsensitiveSorting").then().body(is("OK"));
     }
 
     @DisabledOnIntegrationTest

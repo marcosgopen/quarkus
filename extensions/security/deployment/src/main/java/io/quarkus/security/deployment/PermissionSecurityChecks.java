@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -193,10 +194,6 @@ interface PermissionSecurityChecks {
             if (!checkerMethod.exceptions().isEmpty()) {
                 throw new RuntimeException("@PermissionChecker method '%s' declares checked exceptions which is not allowed"
                         .formatted(toString(checkerMethod)));
-            }
-            if (checkerMethod.parametersCount() == 0) {
-                throw new RuntimeException(
-                        "@PermissionChecker method '%s' must have at least one parameter".formatted(toString(checkerMethod)));
             }
 
             // Permission constructor: permission name, <<secured-method-parameters>>...
@@ -686,7 +683,8 @@ interface PermissionSecurityChecks {
                 }
             }
 
-            for (var permissionToAction : permissionToActions.entrySet()) {
+            for (var permissionToAction : permissionToActions.entrySet().stream()
+                    .sorted(Comparator.comparing(e -> e.getKey().permissionName())).toList()) {
                 final var permissionNameKey = permissionToAction.getKey();
                 final var permissionActions = permissionToAction.getValue();
                 final var key = new PermissionKey(permissionNameKey.permissionName, permissionActions, params, classType,
@@ -1047,7 +1045,7 @@ interface PermissionSecurityChecks {
         }
 
         private static final class LogicalOrPermissionPredicate {
-            private final Set<PermissionWrapper> operands = new HashSet<>();
+            private final Set<PermissionWrapper> operands = new LinkedHashSet<>();
 
             private LogicalOrPermissionPredicate or(PermissionWrapper permission) {
                 operands.add(permission);
@@ -1093,7 +1091,7 @@ interface PermissionSecurityChecks {
         }
 
         private static final class LogicalAndPermissionPredicate {
-            private final Set<LogicalOrPermissionPredicate> operands = new HashSet<>();
+            private final Set<LogicalOrPermissionPredicate> operands = new LinkedHashSet<>();
             private boolean atLeastOnePermissionIsComputed = false;
 
             private void and(LogicalOrPermissionPredicate orPermissionPredicate) {

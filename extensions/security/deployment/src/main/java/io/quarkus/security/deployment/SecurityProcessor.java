@@ -15,6 +15,7 @@ import static io.quarkus.security.runtime.SecurityProviderUtils.findProviderInde
 import static io.quarkus.security.spi.SecurityTransformer.AuthorizationType.AUTHORIZATION_POLICY;
 import static io.quarkus.security.spi.SecurityTransformer.AuthorizationType.SECURITY_CHECK;
 import static io.quarkus.security.spi.SecurityTransformerBuildItem.createSecurityTransformer;
+import static io.quarkus.security.spi.SecurityTransformerBuildItem.getAllSecurityAnnotations;
 
 import java.io.IOException;
 import java.lang.reflect.Modifier;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -100,6 +102,7 @@ import io.quarkus.deployment.builditem.nativeimage.RuntimeInitializedClassBuildI
 import io.quarkus.deployment.execannotations.ExecutionModelAnnotationsAllowedBuildItem;
 import io.quarkus.deployment.pkg.NativeConfig;
 import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
+import io.quarkus.deployment.pkg.builditem.JarTreeShakeExcludedArtifactBuildItem;
 import io.quarkus.deployment.pkg.steps.NativeImageFutureDefault;
 import io.quarkus.gizmo.CatchBlockCreator;
 import io.quarkus.gizmo.ClassCreator;
@@ -149,6 +152,7 @@ import io.quarkus.security.spi.RegisterClassSecurityCheckBuildItem;
 import io.quarkus.security.spi.RolesAllowedConfigExpResolverBuildItem;
 import io.quarkus.security.spi.RunAsUserPredicateBuildItem;
 import io.quarkus.security.spi.SecuredInterfaceAnnotationBuildItem;
+import io.quarkus.security.spi.SecuredTopLevelInterfaceBuildItem;
 import io.quarkus.security.spi.SecurityTransformer;
 import io.quarkus.security.spi.SecurityTransformer.AuthorizationType;
 import io.quarkus.security.spi.SecurityTransformerBuildItem;
@@ -173,34 +177,44 @@ public class SecurityProcessor {
     SecurityConfig security;
 
     @BuildStep
-    SecurityTransformerBuildItem createSecurityTransformerBuildItem(
-            List<SecuredInterfaceAnnotationBuildItem> securedInterfacePredicates,
+    AuthorizationTypeToSecurityAnnotationsBuildItem collectSecurityAnnotations(
             List<AdditionalSecurityAnnotationBuildItem> additionalSecurityAnnotationBuildItems) {
-        // collect security annotations
         Map<AuthorizationType, Set<DotName>> authorizationTypeToSecurityAnnotations = new EnumMap<>(AuthorizationType.class);
         authorizationTypeToSecurityAnnotations.put(SECURITY_CHECK, new HashSet<>(SECURITY_CHECK_ANNOTATIONS));
         additionalSecurityAnnotationBuildItems.forEach(i -> authorizationTypeToSecurityAnnotations
                 .computeIfAbsent(i.getAuthorizationType(), k -> new HashSet<>()).add(i.getSecurityAnnotationName()));
+        return new AuthorizationTypeToSecurityAnnotationsBuildItem(authorizationTypeToSecurityAnnotations);
+    }
+
+    @BuildStep
+    SecurityTransformerBuildItem createSecurityTransformerBuildItem(
+            AuthorizationTypeToSecurityAnnotationsBuildItem authorizationTypeToSecurityAnnotations,
+            List<SecuredTopLevelInterfaceBuildItem> securedTopLevelInterfaceBuildItems,
+            List<SecuredInterfaceAnnotationBuildItem> securedInterfacePredicates) {
 
         Predicate<ClassInfo> isInterfaceWithTransformations = securedInterfacePredicates.stream()
                 .map(SecuredInterfaceAnnotationBuildItem::getIsInterfaceWithTransformations)
                 .reduce(Predicate::or)
-                .orElse(null);
+                .orElse(ci -> false);
         Set<DotName> securedAnnotations = securedInterfacePredicates.stream()
                 .map(SecuredInterfaceAnnotationBuildItem::getAnnotationName)
                 .collect(Collectors.toSet());
-
-        return new SecurityTransformerBuildItem(authorizationTypeToSecurityAnnotations, isInterfaceWithTransformations,
-                securedAnnotations);
+        Set<DotName> securedTopLevelInterfaces = securedTopLevelInterfaceBuildItems.stream()
+                .map(SecuredTopLevelInterfaceBuildItem::getTopLevelInterfaceName)
+                .collect(Collectors.toSet());
+        boolean interfaceSecurityEnabled = !securedInterfacePredicates.isEmpty() || !securedTopLevelInterfaces.isEmpty();
+        return new SecurityTransformerBuildItem(authorizationTypeToSecurityAnnotations.result, isInterfaceWithTransformations,
+                securedAnnotations, interfaceSecurityEnabled, securedTopLevelInterfaces);
     }
 
     @BuildStep
-    List<AdditionalIndexedClassesBuildItem> registerAdditionalIndexedClassesBuildItem(
-            SecurityTransformerBuildItem securityTransformerBuildItem) {
+    AdditionalIndexedClassesBuildItem registerAdditionalIndexedClassesBuildItem(
+            AuthorizationTypeToSecurityAnnotationsBuildItem authorizationTypeToSecurityAnnotations) {
         // we need the combined index to contain security annotations in order to check for repeatable annotations
         // (we do not hardcode here knowledge which annotation is repeatable and which one isn't, so we check all)
-        return List
-                .of(new AdditionalIndexedClassesBuildItem(securityTransformerBuildItem.getAllSecurityAnnotationNames()));
+        var securityAnnotationsNames = getAllSecurityAnnotations(authorizationTypeToSecurityAnnotations.result)
+                .stream().map(DotName::toString).toArray(String[]::new);
+        return new AdditionalIndexedClassesBuildItem(securityAnnotationsNames);
     }
 
     @BuildStep
@@ -284,9 +298,11 @@ public class SecurityProcessor {
     void prepareBouncyCastleProviders(CurateOutcomeBuildItem curateOutcomeBuildItem,
             BuildProducer<ReflectiveClassBuildItem> reflection,
             BuildProducer<RuntimeInitializedClassBuildItem> runtimeReInitialized,
+            BuildProducer<JarTreeShakeExcludedArtifactBuildItem> treeShakeExclusions,
             List<BouncyCastleProviderBuildItem> bouncyCastleProviders,
             List<BouncyCastleJsseProviderBuildItem> bouncyCastleJsseProviders) throws Exception {
         Optional<BouncyCastleJsseProviderBuildItem> bouncyCastleJsseProvider = getOne(bouncyCastleJsseProviders);
+        boolean isFipsMode = false;
         if (bouncyCastleJsseProvider.isPresent()) {
             reflection.produce(
                     ReflectiveClassBuildItem.builder(SecurityProviderUtils.BOUNCYCASTLE_JSSE_PROVIDER_CLASS_NAME).methods()
@@ -297,13 +313,24 @@ public class SecurityProcessor {
             runtimeReInitialized
                     .produce(new RuntimeInitializedClassBuildItem(
                             "org.bouncycastle.jsse.provider.DefaultSSLContextSpi$LazyManagers"));
-            prepareBouncyCastleProvider(curateOutcomeBuildItem, reflection, runtimeReInitialized,
-                    bouncyCastleJsseProvider.get().isInFipsMode());
+            isFipsMode = bouncyCastleJsseProvider.get().isInFipsMode();
+            prepareBouncyCastleProvider(curateOutcomeBuildItem, reflection, runtimeReInitialized, isFipsMode);
         } else {
             Optional<BouncyCastleProviderBuildItem> bouncyCastleProvider = getOne(bouncyCastleProviders);
             if (bouncyCastleProvider.isPresent()) {
-                prepareBouncyCastleProvider(curateOutcomeBuildItem, reflection, runtimeReInitialized,
-                        bouncyCastleProvider.get().isInFipsMode());
+                isFipsMode = bouncyCastleProvider.get().isInFipsMode();
+                prepareBouncyCastleProvider(curateOutcomeBuildItem, reflection, runtimeReInitialized, isFipsMode);
+            }
+        }
+        // BouncyCastle FIPS performs a self-integrity check (FIPS 140-2) by computing a checksum
+        // over its own classes. Tree-shaking would remove unreachable classes, changing the checksum
+        // and causing the integrity check to fail. Exclude all bc-fips JARs from tree-shaking.
+        if (isFipsMode) {
+            for (var dep : curateOutcomeBuildItem.getApplicationModel().getDependencies()) {
+                if ("org.bouncycastle".equals(dep.getGroupId())
+                        && dep.getArtifactId().startsWith("bc") && dep.getArtifactId().contains("fips")) {
+                    treeShakeExclusions.produce(new JarTreeShakeExcludedArtifactBuildItem(dep.getKey()));
+                }
             }
         }
     }
@@ -905,8 +932,8 @@ public class SecurityProcessor {
         classPredicate.produce(new ApplicationClassPredicateBuildItem(new SecurityCheckStorageAppPredicate()));
 
         RuntimeValue<SecurityCheckStorageBuilder> builder = recorder.newBuilder();
-        for (Map.Entry<MethodInfo, SecurityCheck> methodEntry : securityChecksItem.securityChecks
-                .entrySet()) {
+        for (Map.Entry<MethodInfo, SecurityCheck> methodEntry : securityChecksItem.securityChecks.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey(Comparator.comparing(MethodInfo::toString))).toList()) {
             MethodInfo method = methodEntry.getKey();
             String[] params = new String[method.parametersCount()];
             for (int i = 0; i < method.parametersCount(); ++i) {
@@ -1082,7 +1109,8 @@ public class SecurityProcessor {
         Map<Set<String>, SecurityCheck> cache = new HashMap<>();
         final AtomicInteger keyIndex = new AtomicInteger(0);
         final AtomicBoolean hasRolesAllowedCheckWithConfigExp = new AtomicBoolean(false);
-        for (Map.Entry<MethodInfo, String[]> entry : methodToRoles.entrySet()) {
+        for (Map.Entry<MethodInfo, String[]> entry : methodToRoles.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey(Comparator.comparing(MethodInfo::toString))).toList()) {
             final MethodInfo methodInfo = entry.getKey();
             result.put(methodInfo,
                     computeRolesAllowedCheck(cache, hasRolesAllowedCheckWithConfigExp, keyIndex, recorder, entry.getValue()));
@@ -1090,28 +1118,30 @@ public class SecurityProcessor {
 
         if (!registerClassSecurityCheckBuildItems.isEmpty()) {
             var classStorageBuilder = new ClassStorageBuilder();
-            registerClassSecurityCheckBuildItems.forEach(item -> {
-                var securityAnnotationName = item.getSecurityAnnotationInstance().name();
+            registerClassSecurityCheckBuildItems.stream()
+                    .sorted(Comparator.comparing(item -> item.getClassName().toString())).forEach(item -> {
+                        var securityAnnotationName = item.getSecurityAnnotationInstance().name();
 
-                final SecurityCheck securityCheck;
-                if (DENY_ALL.equals(securityAnnotationName)) {
-                    securityCheck = recorder.denyAll();
-                } else if (PERMIT_ALL.equals(securityAnnotationName)) {
-                    securityCheck = recorder.permitAll();
-                } else if (AUTHENTICATED.equals(securityAnnotationName)) {
-                    securityCheck = recorder.authenticated();
-                } else if (ROLES_ALLOWED.equals(securityAnnotationName)) {
-                    var allowedRoles = item.getSecurityAnnotationInstance().value().asStringArray();
-                    securityCheck = computeRolesAllowedCheck(cache, hasRolesAllowedCheckWithConfigExp, keyIndex, recorder,
-                            allowedRoles);
-                } else if (PERMISSIONS_ALLOWED.equals(securityAnnotationName)) {
-                    securityCheck = Objects.requireNonNull(classNameToPermCheck.get(item.getClassName()));
-                } else {
-                    throw new IllegalStateException("Found unknown security annotation: " + securityAnnotationName);
-                }
+                        final SecurityCheck securityCheck;
+                        if (DENY_ALL.equals(securityAnnotationName)) {
+                            securityCheck = recorder.denyAll();
+                        } else if (PERMIT_ALL.equals(securityAnnotationName)) {
+                            securityCheck = recorder.permitAll();
+                        } else if (AUTHENTICATED.equals(securityAnnotationName)) {
+                            securityCheck = recorder.authenticated();
+                        } else if (ROLES_ALLOWED.equals(securityAnnotationName)) {
+                            var allowedRoles = item.getSecurityAnnotationInstance().value().asStringArray();
+                            securityCheck = computeRolesAllowedCheck(cache, hasRolesAllowedCheckWithConfigExp, keyIndex,
+                                    recorder,
+                                    allowedRoles);
+                        } else if (PERMISSIONS_ALLOWED.equals(securityAnnotationName)) {
+                            securityCheck = Objects.requireNonNull(classNameToPermCheck.get(item.getClassName()));
+                        } else {
+                            throw new IllegalStateException("Found unknown security annotation: " + securityAnnotationName);
+                        }
 
-                classStorageBuilder.addSecurityCheck(item.getClassName(), securityCheck);
-            });
+                        classStorageBuilder.addSecurityCheck(item.getClassName(), securityCheck);
+                    });
             classSecurityCheckStorageProducer.produce(classStorageBuilder.build());
         }
 
@@ -1478,4 +1508,13 @@ public class SecurityProcessor {
         }
     }
 
+    private static final class AuthorizationTypeToSecurityAnnotationsBuildItem extends SimpleBuildItem {
+
+        private final Map<AuthorizationType, Set<DotName>> result;
+
+        private AuthorizationTypeToSecurityAnnotationsBuildItem(
+                Map<AuthorizationType, Set<DotName>> authorizationTypeToSecurityAnnotations) {
+            this.result = Collections.unmodifiableMap(authorizationTypeToSecurityAnnotations);
+        }
+    }
 }

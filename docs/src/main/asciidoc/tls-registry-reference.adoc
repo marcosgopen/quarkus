@@ -351,7 +351,7 @@ quarkus.tls.key-store.jks.alias-password=my-alias-password
 Note that all keys must use the same password.
 
 ==== Provided keystores
-If you need more control over the keystore used in a TLS configuration, you can provide a CDI bean implementing the `io.quarkus.tls.runtime.KeyStoreProvider` interface.
+If you need more control over the keystore used in a TLS configuration, you can provide a CDI bean implementing the `io.quarkus.tls.KeyStoreProvider` interface.
 
 Quarkus calls `KeyStoreProvider::getKeyStore` when the TLS configuration is <<startup-checks,initially created>> and any time the configuration is <<reloading-certificates,reloaded>>.
 The resulting keystore and options are then made available via `TlsConfiguration::getKeyStore` and `TlsConfiguration::getKeyStoreOptions`.
@@ -359,8 +359,8 @@ The resulting keystore and options are then made available via `TlsConfiguration
 .Example KeyStoreProvider
 [source, java]
 ----
-import io.quarkus.tls.runtime.KeyStoreAndKeyCertOptions;
-import io.quarkus.tls.runtime.KeyStoreProvider;
+import io.quarkus.tls.KeyStoreAndKeyCertOptions;
+import io.quarkus.tls.KeyStoreProvider;
 import io.smallrye.common.annotation.Identifier;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -396,6 +396,111 @@ Omit the qualifier to indicate the default TLS configuration.
 You can also use `@Default` explicitly to indicate the default TLS configuration.
 For more information, see <<referencing-a-tls-configuration>>.
 <3> You can inject other CDI beans to access keystore material at runtime.
+
+==== Other keystore types
+
+If you need to use a keystore type other than PEM, PKCS12, or JKS (for example, Bouncy Castle FIPS `BCFKS`), use the `other` configuration:
+
+[source,properties]
+----
+quarkus.tls.key-store.other.type=bcfks
+quarkus.tls.key-store.other.provider=BCFIPS
+quarkus.tls.key-store.other.path=server-keystore.bcfks
+quarkus.tls.key-store.other.password=secret
+quarkus.tls.key-store.other.alias=mykey
+quarkus.tls.key-store.other.alias-password=secret
+----
+
+The `type` property is required and corresponds to the type passed to `java.security.KeyStore.getInstance(type)`.
+The optional `provider` property specifies the Java security provider name.
+All other properties (`path`, `password`, `alias`, `alias-password`) work identically to the JKS and PKCS12 configurations.
+The `other` option is mutually exclusive with `pem`, `p12`, `jks`, and `KeyStoreProvider` beans.
+
+===== Custom keystore factory
+
+For keystore types that require custom loading logic beyond `KeyStore.getInstance()`, implement a `KeyStoreFactory` CDI bean annotated with `@Identifier` matching the `type` value:
+
+[source,java]
+----
+import io.quarkus.tls.KeyStoreAndKeyCertOptions;
+import io.quarkus.tls.KeyStoreFactory;
+import io.quarkus.tls.OtherKeyStoreConfigurationuration;
+import io.smallrye.common.annotation.Identifier;
+import io.vertx.core.Vertx;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+@Identifier("my-custom-type")
+public class MyKeyStoreFactory implements KeyStoreFactory {
+
+    @Override
+    public KeyStoreAndKeyCertOptions createKeyStore(OtherKeyStoreConfiguration config, Vertx vertx, String name) {
+        // Custom keystore loading logic
+        // Access arbitrary params via config.params()
+    }
+}
+----
+
+The factory receives the full `OtherKeyStoreConfiguration`, including arbitrary parameters set via `quarkus.tls.key-store.other.params.<key>=<value>`.
+If no factory bean is found for the given type, the standard `KeyStore.getInstance(type, provider)` loading is used as a fallback.
+
+===== PKCS#11 example
+
+PKCS#11 keystores are provider-managed (backed by a hardware security module or software token) and cannot be loaded from a file.
+Use a `KeyStoreFactory` to integrate a PKCS#11 keystore with the TLS registry:
+
+[source,properties]
+----
+quarkus.tls.key-store.other.type=PKCS11
+quarkus.tls.key-store.other.params.config-file=/etc/pkcs11/provider.cfg
+----
+
+[source,java]
+----
+import java.io.FileInputStream;
+import java.security.KeyStore;
+import java.security.Provider;
+import java.security.Security;
+
+import io.quarkus.tls.KeyStoreAndKeyCertOptions;
+import io.quarkus.tls.KeyStoreFactory;
+import io.quarkus.tls.OtherKeyStoreConfigurationuration;
+import io.smallrye.common.annotation.Identifier;
+import io.vertx.core.Vertx;
+import io.vertx.core.net.KeyStoreOptionsBase;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+@Identifier("PKCS11") // <1>
+public class Pkcs11KeyStoreFactory implements KeyStoreFactory {
+
+    @Override
+    public KeyStoreAndKeyCertOptions createKeyStore(OtherKeyStoreConfiguration config, Vertx vertx, String name) {
+        try {
+            String configFile = config.params().get("config-file"); // <2>
+            Provider provider = Security.getProvider("SunPKCS11").configure(configFile);
+            Security.addProvider(provider);
+
+            KeyStore ks = KeyStore.getInstance("PKCS11", provider);
+            char[] pin = config.password().map(String::toCharArray).orElse(null);
+            ks.load(null, pin); // <3>
+
+            var options = new KeyStoreOptionsBase() {} // <4>
+                    .setKeyStoreType("PKCS11")
+                    .setProviderName(provider.getName())
+                    .setPassword(config.password().orElse(null));
+
+            return new KeyStoreAndKeyCertOptions(ks, options);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load PKCS#11 keystore for '" + name + "'", e);
+        }
+    }
+}
+----
+<1> The `@Identifier` value must match the `type` in the configuration.
+<2> Arbitrary parameters from `quarkus.tls.key-store.other.params.*` are available via `config.params()`.
+<3> PKCS#11 keystores are loaded with `null` — the provider manages the underlying storage.
+<4> Use `KeyStoreOptionsBase` to let Vert.x create a `KeyManagerFactory` from the provider-backed keystore.
 
 [[sni]]
 ==== SNI
@@ -500,13 +605,13 @@ quarkus.tls.trust-store.jks.alias=my-alias
 However, unlike keystores, the alias does not require a password because it contains a public certificate, not a private key.
 
 ==== Provided truststores
-If you need more control over the truststore used in a TLS configuration, you can provide a CDI bean implementing the `io.quarkus.tls.runtime.TrustStoreProvider` interface. Quarkus calls `TrustStoreProvider::getTrustStore` when the TLS configuration is <<startup-checks,initially created>> and any time the configuration is <<reloading-certificates,reloaded>>. The resulting truststore and options are then made available via `TlsConfiguration::getTrustStore` and `TlsConfiguration::getTrustStoreOptions`.
+If you need more control over the truststore used in a TLS configuration, you can provide a CDI bean implementing the `io.quarkus.tls.TrustStoreProvider` interface. Quarkus calls `TrustStoreProvider::getTrustStore` when the TLS configuration is <<startup-checks,initially created>> and any time the configuration is <<reloading-certificates,reloaded>>. The resulting truststore and options are then made available via `TlsConfiguration::getTrustStore` and `TlsConfiguration::getTrustStoreOptions`.
 
 .Example TrustStoreProvider
 [source, java]
 ----
-import io.quarkus.tls.runtime.TrustStoreAndTrustOptions;
-import io.quarkus.tls.runtime.TrustStoreProvider;
+import io.quarkus.tls.TrustStoreAndTrustOptions;
+import io.quarkus.tls.TrustStoreProvider;
 import io.smallrye.common.annotation.Identifier;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -542,6 +647,21 @@ You can also use `@Default` explicitly to indicate the default TLS configuration
 For more information, see <<referencing-a-tls-configuration>>.
 <3> You can inject other CDI beans to access truststore material at runtime.
 
+==== Other truststore types
+
+If you need to use a truststore type other than PEM, PKCS12, or JKS, use the `other` configuration:
+
+[source,properties]
+----
+quarkus.tls.trust-store.other.type=bcfks
+quarkus.tls.trust-store.other.provider=BCFIPS
+quarkus.tls.trust-store.other.path=truststore.bcfks
+quarkus.tls.trust-store.other.password=secret
+quarkus.tls.trust-store.other.alias=myca
+----
+
+This works the same as the <<Other keystore types>> configuration described above.
+For custom loading logic, implement a `TrustStoreFactory` CDI bean annotated with `@Identifier` matching the `type` value.
 
 ==== Credential providers
 
@@ -1560,6 +1680,24 @@ quarkus tls lets-encrypt issue-certificate \
 <2> Provide your contact email address that Let's Encrypt can use to contact you in case of any issues with your Let's Encrypt account.
 <3> Set your application management URL, which you can use to handle ACME challenges.
 Use `https://localhost:8443/` if you choose not to enable a management router in the <<lets-encrypt-prerequisites,Let's Encrypt prerequisites>> step.
++
+Additional options are available:
++
+[source,shell]
+----
+  --acme-server-url=<url>         Custom ACME production server URL (default: Let's Encrypt production)
+  --acme-staging-server-url=<url> Custom ACME staging server URL (default: Let's Encrypt staging)
+  --staging                       Use staging environment (default: false)
+  --insecure                      Disable SSL certificate validation for the management endpoint (INSECURE - development/testing only)
+----
++
+These options allow you to:
++
+* Use alternative ACME providers such as link:https://zerossl.com/[ZeroSSL] or custom ACME servers to issue certificates from different providers.
+* Test with staging environments to avoid rate limits during development.
+* Disable SSL validation for testing with self-signed management certificates (not recommended for production).
++
+NOTE: If `--staging` is set to `true`, the TLS registry CLI uses the staging server URL, which is either the default Let's Encrypt staging server or the custom staging server provided with `--acme-staging-server-url`.
 
 . During the processing of the `issue-certificate` command, the TLS registry CLI performs the following tasks:
 
@@ -1589,13 +1727,84 @@ Run the following command to renew your Let's Encrypt certificate and set your d
 [source,shell]
 ----
 quarkus tls lets-encrypt renew-certificate \
-  --domain=<domain-dns-name>
+  --domain=<domain-dns-name> \
+  --management-url=https://localhost:9000
 ----
 
 During this command, the TLS registry CLI reads the Let's Encrypt account information recorded during the <<lets-encrypt-issue-certificate,Issue certificates with Let's Encrypt>> step, issues a Let's Encrypt certificate request, and communicates with the Quarkus application to resolve ACME challenges.
 
 After the `renew-certificate` command renews the Let's Encrypt certificate chain and private key, the TLS registry CLI converts them to PEM format and copies them to the `.letsencrypt` folder.
 The TLS registry detects the new certificate and private key and reloads them automatically.
+
+Additional options are available to support alternative ACME providers:
+
+[source,shell]
+----
+  --acme-server-url=<url>         Custom ACME production server URL (default: Let's Encrypt production)
+  --acme-staging-server-url=<url> Custom ACME staging server URL (default: Let's Encrypt staging)
+  --insecure                      Disable SSL certificate validation for the management endpoint (INSECURE - development/testing only)
+----
+
+For example, to renew a certificate from ZeroSSL:
+
+[source,shell]
+----
+quarkus tls lets-encrypt renew-certificate \
+  --domain=<domain-dns-name> \
+  --management-url=https://localhost:9000 \
+  --acme-server-url=https://acme.zerossl.com/v2/DV90
+----
+
+=== Using alternative ACME providers
+
+While Let's Encrypt is the default ACME provider, you can use other ACME-compatible certificate authorities by specifying custom server URLs.
+This is useful for:
+
+* **Disaster recovery**: Failover to different providers if Let's Encrypt experiences outages
+* **Regional requirements**: Use providers that better serve specific geographic regions
+* **Organizational policies**: Comply with company requirements for specific CAs
+* **Testing**: Use custom staging servers during development
+
+==== Supported ACME providers
+
+The following ACME providers are known to work with Quarkus:
+
+[cols="1,2,2"]
+|===
+|Provider |Production URL |Staging URL
+
+|Let's Encrypt (default)
+|`https://acme-v02.api.letsencrypt.org/directory`
+|`https://acme-staging-v02.api.letsencrypt.org/directory`
+
+|ZeroSSL
+|`https://acme.zerossl.com/v2/DV90`
+|N/A (use Let's Encrypt staging for testing)
+
+|BuyPass Go
+|`https://api.buypass.com/acme/directory`
+|`https://api.test4.buypass.no/acme/directory`
+
+|Google Trust Services
+|`https://dv.acme-v02.api.pki.goog/directory`
+|`https://dv.acme-v02.test-api.pki.goog/directory`
+|===
+
+==== Example: Using ZeroSSL
+
+To issue a certificate from ZeroSSL instead of Let's Encrypt:
+
+[source,shell]
+----
+quarkus tls lets-encrypt issue-certificate \
+  --domain=example.com \
+  --email=admin@example.com \
+  --management-url=https://localhost:9000 \
+  --acme-server-url=https://acme.zerossl.com/v2/DV90
+----
+
+IMPORTANT: Each ACME provider may have different rate limits, account requirements, and supported features.
+Consult the provider's documentation before using them in production.
 
 [[lets-encrypt-ngrok]]
 === Testing with ngrok

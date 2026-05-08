@@ -545,6 +545,7 @@ public class SmallRyeOpenApiProcessor {
 
                 return false;
             }
+
         };
 
         return new OpenApiFilteredIndexViewBuildItem(indexView);
@@ -873,7 +874,7 @@ public class SmallRyeOpenApiProcessor {
 
     private List<String> getPermissionsAllowedMethodReferences(OpenApiSecurityTransformer securityTransformer) {
         return securityTransformer
-                .getAnnotations(DotName.createSimple(PermissionsAllowed.class))
+                .getAnnotationsWithRepeatable(DotName.createSimple(PermissionsAllowed.class))
                 .stream()
                 .flatMap(t -> getMethods(t, securityTransformer.getIndex()))
                 .map(e -> createUniqueMethodReference(e.getKey().classInfo(), e.getKey().method()))
@@ -1503,7 +1504,7 @@ public class SmallRyeOpenApiProcessor {
         List<String> filenames = new ArrayList<>();
         // Here we are resolving the resource dir relative to the classes dir and if it does not exist, we fall back to locating the resource dir on the classpath.
         // Although the classes dir should already be on the classpath.
-        // In a QuarkusUnitTest the module's classes dir and the test application root could be different directories, is this code here for that reason?
+        // In a QuarkusExtensionTest the module's classes dir and the test application root could be different directories, is this code here for that reason?
         final Path targetResourceDir = target == null ? null : target.resolve("classes").resolve(resourcePath);
         if (targetResourceDir != null && Files.exists(targetResourceDir)) {
             try (Stream<Path> paths = Files.list(targetResourceDir)) {
@@ -1559,6 +1560,35 @@ public class SmallRyeOpenApiProcessor {
             }
 
             @Override
+            public Collection<AnnotationInstance> getAnnotationsWithRepeatable(DotName securityAnnotationName) {
+                // Avoid IndexView#getAnnotationsWithRepeatable as it requires the annotation definition
+                // to be present in the index (to discover the @Repeatable container via reflection).
+                // When MicroProfile filter options like `mp.openapi.scan.*` are in use, the annotation
+                // class may not be visible in the filtered index. Instead, look up both the annotation
+                // and its repeatable container (conventionally named `$List`) directly.
+                DotName containerName = DotName.createSimple(securityAnnotationName.toString() + "$List");
+                Collection<AnnotationInstance> directAnnotations;
+                Collection<AnnotationInstance> containerAnnotations;
+                if (securityTransformer != null) {
+                    directAnnotations = securityTransformer.getAnnotations(securityAnnotationName);
+                    containerAnnotations = securityTransformer.getAnnotations(containerName);
+                } else {
+                    directAnnotations = index.getAnnotations(securityAnnotationName);
+                    containerAnnotations = index.getAnnotations(containerName);
+                }
+                List<AnnotationInstance> results = new ArrayList<>(directAnnotations);
+                for (AnnotationInstance container : containerAnnotations) {
+                    AnnotationValue value = container.value();
+                    if (value != null) {
+                        for (AnnotationInstance nested : value.asNestedArray()) {
+                            results.add(AnnotationInstance.create(nested.name(), container.target(), nested.values()));
+                        }
+                    }
+                }
+                return results;
+            }
+
+            @Override
             public IndexView getIndex() {
                 return index;
             }
@@ -1568,6 +1598,8 @@ public class SmallRyeOpenApiProcessor {
     private interface OpenApiSecurityTransformer {
 
         Collection<AnnotationInstance> getAnnotations(DotName securityAnnotationName);
+
+        Collection<AnnotationInstance> getAnnotationsWithRepeatable(DotName securityAnnotationName);
 
         IndexView getIndex();
 

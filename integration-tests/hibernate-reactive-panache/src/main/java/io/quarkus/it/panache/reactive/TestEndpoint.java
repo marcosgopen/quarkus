@@ -2062,6 +2062,46 @@ public class TestEndpoint {
 
     @WithTransaction
     @GET
+    @Path("projection-aggregate-function")
+    public Uni<String> testProjectionWithAggregateFunction() {
+        // Clean up and setup test data
+        return Cat.deleteAll()
+                .chain(() -> CatOwner.deleteAll())
+                .chain(() -> {
+                    CatOwner owner1 = new CatOwner("Owner1");
+                    return owner1.persist()
+                            .chain(() -> {
+                                CatOwner owner2 = new CatOwner("Owner2");
+                                return owner2.persist()
+                                        .chain(() -> {
+                                            Cat cat1 = new Cat("Cat1", owner1, 5.0);
+                                            return cat1.persist();
+                                        })
+                                        .chain(() -> {
+                                            Cat cat2 = new Cat("Cat2", owner1, 7.0);
+                                            return cat2.persist();
+                                        })
+                                        .chain(() -> {
+                                            Cat cat3 = new Cat("Cat3", owner2, 3.0);
+                                            return cat3.persist();
+                                        });
+                            });
+                })
+                .chain(() -> Cat.find("FROM Cat c GROUP BY c.owner ORDER BY c.owner.name")
+                        .project(CatOwnerWeightDto.class)
+                        .list())
+                .invoke(results -> {
+                    Assertions.assertEquals(2, results.size());
+                    Assertions.assertEquals("Owner1", results.get(0).ownerName());
+                    Assertions.assertEquals(12.0, results.get(0).totalWeight());
+                    Assertions.assertEquals("Owner2", results.get(1).ownerName());
+                    Assertions.assertEquals(3.0, results.get(1).totalWeight());
+                })
+                .replaceWith("OK");
+    }
+
+    @WithTransaction
+    @GET
     @Path("model3")
     public Uni<String> testModel3() {
         return Person.count()
@@ -2331,6 +2371,54 @@ public class TestEndpoint {
                     return Person.findAll(Sort.by("name", Sort.NullPrecedence.NULLS_LAST)).list();
                 }).flatMap(list -> {
                     assertEquals("jose", ((Person) list.get(list.size() - 1)).uniqueName);
+
+                    return Person.deleteAll();
+                }).map(v -> "OK");
+    }
+
+    @GET
+    @Path("testCaseInsensitiveSorting")
+    @WithTransaction
+    public Uni<String> testCaseInsensitiveSorting() {
+        return Person.deleteAll()
+                .flatMap(v -> {
+                    Person apple = new Person();
+                    apple.name = "apple";
+                    apple.uniqueName = "1";
+
+                    Person BANANA = new Person();
+                    BANANA.name = "BANANA";
+                    BANANA.uniqueName = "2";
+
+                    Person cherry = new Person();
+                    cherry.name = "cherry";
+                    cherry.uniqueName = "3";
+
+                    return Person.persist(apple, BANANA, cherry);
+                }).flatMap(p -> {
+                    // Test case-insensitive ascending sort
+                    return Person.findAll(Sort.ascendingIgnoreCase("name")).list();
+                }).flatMap(list -> {
+                    assertEquals(3, list.size());
+                    assertEquals("apple", ((Person) list.get(0)).name);
+                    assertEquals("BANANA", ((Person) list.get(1)).name);
+                    assertEquals("cherry", ((Person) list.get(2)).name);
+
+                    // Test case-insensitive descending sort
+                    return Person.findAll(Sort.descendingIgnoreCase("name")).list();
+                }).flatMap(list -> {
+                    assertEquals(3, list.size());
+                    assertEquals("cherry", ((Person) list.get(0)).name);
+                    assertEquals("BANANA", ((Person) list.get(1)).name);
+                    assertEquals("apple", ((Person) list.get(2)).name);
+
+                    // Test fluent API
+                    return Person.findAll(Sort.by("name").ignoreCase()).list();
+                }).flatMap(list -> {
+                    assertEquals(3, list.size());
+                    assertEquals("apple", ((Person) list.get(0)).name);
+                    assertEquals("BANANA", ((Person) list.get(1)).name);
+                    assertEquals("cherry", ((Person) list.get(2)).name);
 
                     return Person.deleteAll();
                 }).map(v -> "OK");

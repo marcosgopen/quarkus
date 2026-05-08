@@ -282,7 +282,6 @@ public final class ClassNames {
             createConstant("org.hibernate.annotations.ColumnDefault"),
             createConstant("org.hibernate.annotations.ColumnTransformer"),
             createConstant("org.hibernate.annotations.ColumnTransformers"),
-            createConstant("org.hibernate.annotations.Columns"),
             createConstant("org.hibernate.annotations.Comment"),
             createConstant("org.hibernate.annotations.Comments"),
             createConstant("org.hibernate.annotations.CompositeType"),
@@ -389,6 +388,7 @@ public final class ClassNames {
             createConstant("org.hibernate.annotations.NativeGenerator"),
             createConstant("org.hibernate.annotations.NaturalId"),
             createConstant("org.hibernate.annotations.NaturalIdCache"),
+            createConstant("org.hibernate.annotations.NaturalIdClass"),
             createConstant("org.hibernate.annotations.NotFound"),
             createConstant("org.hibernate.annotations.OnDelete"),
             createConstant("org.hibernate.annotations.OptimisticLock"),
@@ -479,6 +479,9 @@ public final class ClassNames {
             createConstant("java.util.Calendar"),
             createConstant("java.util.Currency"),
             createConstant("java.util.Date"),
+            createConstant("java.sql.Date"),
+            createConstant("java.sql.Time"),
+            createConstant("java.sql.Timestamp"),
             createConstant("java.util.Locale"),
             createConstant("java.util.Map$Entry"),
             createConstant("java.util.TimeZone"),
@@ -499,6 +502,26 @@ public final class ClassNames {
             createConstant("org.geolatte.geom.codec.PostgisWkbDecoder"),
             createConstant("org.geolatte.geom.codec.MySqlWkbDecoder"),
             createConstant("org.geolatte.geom.codec.HANAWkbDecoder"));
+
+    public static final List<DotName> HIBERNATE_VECTOR_TYPE_CONTRIBUTORS = List.of(
+            createConstant("org.hibernate.vector.internal.PGVectorTypeContributor"),
+            createConstant("org.hibernate.vector.internal.OracleVectorTypeContributor"),
+            createConstant("org.hibernate.vector.internal.MariaDBTypeContributor"),
+            createConstant("org.hibernate.vector.internal.MySQLTypeContributor"),
+            createConstant("org.hibernate.vector.internal.DB2VectorTypeContributor"),
+            createConstant("org.hibernate.vector.internal.CockroachTypeContributor"),
+            createConstant("org.hibernate.vector.internal.HANAVectorTypeContributor"),
+            createConstant("org.hibernate.vector.internal.SQLServerTypeContributor"));
+
+    public static final List<DotName> HIBERNATE_VECTOR_FUNCTION_CONTRIBUTORS = List.of(
+            createConstant("org.hibernate.vector.internal.PGVectorFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.OracleVectorFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.MariaDBFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.MySQLFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.DB2VectorFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.CockroachFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.HANAVectorFunctionContributor"),
+            createConstant("org.hibernate.vector.internal.SQLServerVectorFunctionContributor"));
 
     public static final DotName HIBERNATE_ORM_PROCESSOR = createConstant(
             "io.quarkus.hibernate.orm.deployment.HibernateOrmProcessor");

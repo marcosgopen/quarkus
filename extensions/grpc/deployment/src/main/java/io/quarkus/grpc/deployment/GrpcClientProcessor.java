@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -411,13 +412,13 @@ public class GrpcClientProcessor {
             superfluousInterceptors.remove(interceptorClassName);
         }
 
-        Set<Class<?>> perClientInterceptors = new HashSet<>();
+        Set<Class<?>> perClientInterceptors = new LinkedHashSet<>();
         for (String perClientInterceptor : interceptors.nonGlobalInterceptors) {
             reflectiveClassBuildItemBuildProducer
                     .produce(ReflectiveClassBuildItem.builder(perClientInterceptor).constructors(false).build());
             perClientInterceptors.add(recorderContext.classProxy(perClientInterceptor));
         }
-        Set<Class<?>> globalInterceptors = new HashSet<>();
+        Set<Class<?>> globalInterceptors = new LinkedHashSet<>();
         for (String globalInterceptor : interceptors.globalInterceptors) {
             reflectiveClassBuildItemBuildProducer
                     .produce(ReflectiveClassBuildItem.builder(globalInterceptor).constructors(false).build());
@@ -428,7 +429,7 @@ public class GrpcClientProcessor {
         superfluousInterceptors.remove(StorkMeasuringGrpcInterceptor.class.getName());
         superfluousInterceptors.remove(VertxStorkMeasuringGrpcInterceptor.class.getName());
         if (!superfluousInterceptors.isEmpty()) {
-            LOGGER.warnf("At least one unused gRPC client interceptor found: %s. If there are meant to be used globally, " +
+            LOGGER.warnf("At least one unused gRPC client interceptor found: %s. If they are meant to be used globally, " +
                     "annotate them with @GlobalInterceptor.", String.join(", ", superfluousInterceptors));
         }
 

@@ -17,6 +17,7 @@ import org.jboss.jandex.AnnotationTarget;
 import org.jboss.jandex.AnnotationValue;
 import org.jboss.jandex.ArrayType;
 import org.jboss.jandex.ClassInfo;
+import org.jboss.jandex.DotName;
 import org.jboss.jandex.FieldInfo;
 import org.jboss.jandex.IndexView;
 import org.jboss.jandex.MethodInfo;
@@ -24,10 +25,36 @@ import org.jboss.jandex.MethodParameterInfo;
 import org.jboss.jandex.ParameterizedType;
 import org.jboss.jandex.Type;
 import org.jboss.jandex.TypeVariable;
+import org.jboss.logging.Logger;
 
+import com.fasterxml.jackson.annotation.JacksonAnnotation;
+import com.fasterxml.jackson.annotation.JacksonAnnotationsInside;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonBackReference;
+import com.fasterxml.jackson.annotation.JsonClassDescription;
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonGetter;
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonIgnoreType;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonManagedReference;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonPropertyDescription;
+import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import com.fasterxml.jackson.annotation.JsonRawValue;
+import com.fasterxml.jackson.annotation.JsonSetter;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonTypeName;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
+import com.fasterxml.jackson.annotation.JsonValue;
+import com.fasterxml.jackson.annotation.JsonView;
+import com.fasterxml.jackson.databind.PropertyNamingStrategy;
+import com.fasterxml.jackson.databind.annotation.JsonNaming;
 
 import io.quarkus.deployment.GeneratedClassGizmoAdaptor;
 import io.quarkus.deployment.annotations.BuildProducer;
@@ -41,6 +68,38 @@ import io.quarkus.gizmo.ResultHandle;
 import io.quarkus.resteasy.reactive.jackson.SecureField;
 
 public abstract class JacksonCodeGenerator {
+
+    private static final Logger log = Logger.getLogger(JacksonCodeGenerator.class);
+
+    private static final Set<String> SUPPORTED_JACKSON_ANNOTATIONS = Set.of(
+            JacksonAnnotation.class.getName(),
+            JacksonAnnotationsInside.class.getName(),
+            JsonAlias.class.getName(),
+            JsonAnyGetter.class.getName(),
+            JsonAnySetter.class.getName(),
+            JsonBackReference.class.getName(),
+            JsonClassDescription.class.getName(),
+            JsonCreator.class.getName(),
+            JsonFormat.class.getName(),
+            JsonGetter.class.getName(),
+            JsonIgnore.class.getName(),
+            JsonIgnoreProperties.class.getName(),
+            JsonIgnoreType.class.getName(),
+            JsonInclude.class.getName(),
+            JsonManagedReference.class.getName(),
+            JsonNaming.class.getName(),
+            JsonProperty.class.getName(),
+            JsonPropertyDescription.class.getName(),
+            JsonPropertyOrder.class.getName(),
+            JsonRawValue.class.getName(),
+            JsonSetter.class.getName(),
+            JsonSubTypes.class.getName(),
+            JsonTypeInfo.class.getName(),
+            JsonTypeName.class.getName(),
+            JsonUnwrapped.class.getName(),
+            JsonValue.class.getName(),
+            JsonView.class.getName());
+
     protected final BuildProducer<GeneratedClassBuildItem> generatedClassBuildItemBuildProducer;
     protected final IndexView jandexIndex;
 
@@ -75,6 +134,12 @@ public abstract class JacksonCodeGenerator {
     private Optional<String> create(ClassInfo classInfo) {
         String beanClassName = classInfo.name().toString();
         if (vetoedClass(classInfo, beanClassName) || !generatedClassNames.add(beanClassName)) {
+            return Optional.empty();
+        }
+        Optional<String> unknownAnnotation = findUnknownAnnotation(classInfo);
+        if (unknownAnnotation.isPresent()) {
+            log.infof("Skipping generation of reflection-free Jackson serializer for class %s" +
+                    " because it contains the unsupported Jackson annotation %s", beanClassName, unknownAnnotation.get());
             return Optional.empty();
         }
 
@@ -157,12 +222,20 @@ public abstract class JacksonCodeGenerator {
         return className.startsWith("java.") || className.startsWith("jakarta.") || className.startsWith("io.vertx.core.json.");
     }
 
+    private static Optional<String> findUnknownAnnotation(ClassInfo classInfo) {
+        return classInfo.annotations().stream()
+                .map(a -> a.name().toString())
+                .filter(FieldSpecs::isUnknownAnnotation)
+                .findFirst();
+    }
+
     protected enum FieldKind {
         OBJECT(false),
         ARRAY(false),
         LIST(true),
         SET(true),
         MAP(true),
+        OPTIONAL(true),
         TYPE_VARIABLE(true);
 
         private final boolean generic;
@@ -176,6 +249,10 @@ public abstract class JacksonCodeGenerator {
         }
     }
 
+    private static final DotName COLLECTION_NAME = DotName.createSimple(Collection.class);
+    private static final DotName SET_NAME = DotName.createSimple(Set.class);
+    private static final DotName MAP_NAME = DotName.createSimple(Map.class);
+
     protected FieldKind registerTypeToBeGenerated(Type fieldType, String typeName) {
         if (fieldType instanceof TypeVariable) {
             return FieldKind.TYPE_VARIABLE;
@@ -186,17 +263,20 @@ public abstract class JacksonCodeGenerator {
         }
         if (fieldType instanceof ParameterizedType pType) {
             if (pType.arguments().size() == 1) {
-                if (typeName.equals("java.util.List") || typeName.equals("java.util.Collection")
-                        || typeName.equals("java.lang.Iterable")) {
-                    registerTypeToBeGenerated(pType.arguments().get(0));
-                    return FieldKind.LIST;
-                }
-                if (typeName.equals("java.util.Set")) {
+                if (isAssignableTo(typeName, SET_NAME)) {
                     registerTypeToBeGenerated(pType.arguments().get(0));
                     return FieldKind.SET;
                 }
+                if (typeName.equals("java.lang.Iterable") || isAssignableTo(typeName, COLLECTION_NAME)) {
+                    registerTypeToBeGenerated(pType.arguments().get(0));
+                    return FieldKind.LIST;
+                }
+                if (Optional.class.getName().equals(typeName)) {
+                    registerTypeToBeGenerated(pType.arguments().get(0));
+                    return FieldKind.OPTIONAL;
+                }
             }
-            if (pType.arguments().size() == 2 && typeName.equals("java.util.Map")) {
+            if (pType.arguments().size() == 2 && isAssignableTo(typeName, MAP_NAME)) {
                 registerTypeToBeGenerated(pType.arguments().get(0));
                 registerTypeToBeGenerated(pType.arguments().get(1));
                 return FieldKind.MAP;
@@ -206,13 +286,45 @@ public abstract class JacksonCodeGenerator {
         return FieldKind.OBJECT;
     }
 
+    private boolean isAssignableTo(String typeName, DotName targetName) {
+        if (typeName.equals(targetName.toString())) {
+            return true;
+        }
+        ClassInfo classInfo = jandexIndex.getClassByName(typeName);
+        if (classInfo == null) {
+            return false;
+        }
+        // check superclass
+        if (classInfo.superName() != null && isAssignableTo(classInfo.superName().toString(), targetName)) {
+            return true;
+        }
+        // check interfaces
+        for (DotName iface : classInfo.interfaceNames()) {
+            if (isAssignableTo(iface.toString(), targetName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void registerTypeToBeGenerated(Type type) {
         registerTypeToBeGenerated(type.name().toString());
     }
 
     private void registerTypeToBeGenerated(String typeName) {
         ClassInfo classInfo = jandexIndex.getClassByName(typeName);
-        if (classInfo != null && !vetoedClass(classInfo, typeName) && shouldGenerateCodeFor(classInfo)) {
+        if (classInfo == null) {
+            return;
+        }
+        if (vetoedClass(classInfo, typeName)) {
+            if (classInfo.isSealed()) {
+                for (DotName subClassName : classInfo.permittedSubclasses()) {
+                    registerTypeToBeGenerated(subClassName.toString());
+                }
+            }
+            return;
+        }
+        if (shouldGenerateCodeFor(classInfo)) {
             toBeGenerated.add(classInfo);
         }
     }
@@ -221,9 +333,19 @@ public abstract class JacksonCodeGenerator {
         return !classInfo.isEnum();
     }
 
+    protected static String anyGetterBackingFieldName(MethodInfo anyGetterMethod) {
+        String methodName = anyGetterMethod.name();
+        if (methodName.startsWith("get") && methodName.length() > 3) {
+            return methodName.substring(3, 4).toLowerCase() + methodName.substring(4);
+        }
+        return methodName;
+    }
+
     private MethodInfo getterMethodInfo(ClassInfo classInfo, FieldInfo fieldInfo) {
         MethodInfo namedAccessor = findMethod(classInfo, fieldInfo.name());
-        if (namedAccessor != null) {
+        if (namedAccessor != null
+                && (classInfo.isRecord() || namedAccessor.hasAnnotation(JsonProperty.class)
+                        || fieldInfo.hasAnnotation(JsonProperty.class))) {
             return namedAccessor;
         }
         String methodName = (fieldInfo.type().name().toString().equals("boolean") ? "is" : "get") + ucFirst(fieldInfo.name());
@@ -247,28 +369,102 @@ public abstract class JacksonCodeGenerator {
         return ctorOpt;
     }
 
-    protected FieldSpecs fieldSpecsFromField(ClassInfo classInfo, MethodInfo constructor, FieldInfo fieldInfo) {
+    protected PropertyNamingStrategy getNamingStrategy(ClassInfo classInfo) {
+        AnnotationInstance jsonNaming = classInfo.annotation(JsonNaming.class);
+        if (jsonNaming == null || jsonNaming.value() == null) {
+            return null;
+        }
+        String strategyClassName = jsonNaming.value().asClass().name().toString();
+        try {
+            return (PropertyNamingStrategy) Class.forName(strategyClassName)
+                    .getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    protected static String[] getPropertyOrder(ClassInfo classInfo) {
+        AnnotationInstance ann = classInfo.declaredAnnotation(JsonPropertyOrder.class);
+        if (ann == null || ann.value() == null) {
+            return null;
+        }
+        return ann.value().asStringArray();
+    }
+
+    protected boolean isFieldTypeIgnored(FieldSpecs fieldSpecs) {
+        ClassInfo typeInfo = jandexIndex.getClassByName(fieldSpecs.fieldType.name());
+        return typeInfo != null && typeInfo.hasAnnotation(JsonIgnoreType.class);
+    }
+
+    protected static String getClassIncludeValue(ClassInfo classInfo) {
+        AnnotationInstance include = classInfo.declaredAnnotation(JsonInclude.class);
+        if (include == null || include.value() == null) {
+            return null;
+        }
+        String includeValue = include.value().asEnum();
+        return switch (includeValue) {
+            case "NON_NULL" -> "NON_NULL";
+            case "NON_EMPTY" -> "NON_EMPTY";
+            case "NON_ABSENT" -> "NON_ABSENT";
+            default -> null;
+        };
+    }
+
+    protected boolean isEnumType(String typeName) {
+        ClassInfo ci = jandexIndex.getClassByName(typeName);
+        return ci != null && ci.isEnum();
+    }
+
+    protected MethodInfo findAnyGetterMethod(ClassInfo classInfo) {
+        for (MethodInfo method : classMethods(classInfo)) {
+            if (method.hasAnnotation(JsonAnyGetter.class)
+                    && method.parametersCount() == 0
+                    && !java.lang.reflect.Modifier.isStatic(method.flags())) {
+                return method;
+            }
+        }
+        return null;
+    }
+
+    protected static Set<String> getIgnoredProperties(ClassInfo classInfo) {
+        AnnotationInstance ann = classInfo.declaredAnnotation(JsonIgnoreProperties.class);
+        if (ann == null || ann.value() == null) {
+            return Set.of();
+        }
+        String[] names = ann.value().asStringArray();
+        return names.length == 0 ? Set.of() : Set.of(names);
+    }
+
+    protected static boolean shouldIgnoreUnknownProperties(ClassInfo classInfo) {
+        AnnotationInstance ann = classInfo.declaredAnnotation(JsonIgnoreProperties.class);
+        return ann != null && ann.value("ignoreUnknown") != null && ann.value("ignoreUnknown").asBoolean();
+    }
+
+    protected FieldSpecs fieldSpecsFromField(ClassInfo classInfo, MethodInfo constructor, FieldInfo fieldInfo,
+            PropertyNamingStrategy namingStrategy) {
         if (Modifier.isStatic(fieldInfo.flags())) {
             return null;
         }
         MethodInfo getterMethodInfo = getterMethodInfo(classInfo, fieldInfo);
         if (getterMethodInfo != null) {
-            return new FieldSpecs(constructor, fieldInfo, getterMethodInfo);
+            return new FieldSpecs(constructor, fieldInfo, getterMethodInfo, namingStrategy);
         }
         if (Modifier.isPublic(fieldInfo.flags())) {
-            return new FieldSpecs(fieldInfo);
+            return new FieldSpecs(fieldInfo, namingStrategy);
         }
         return null;
     }
 
-    protected FieldSpecs fieldSpecsFromFieldParam(MethodParameterInfo paramInfo) {
-        return new FieldSpecs(paramInfo);
+    protected FieldSpecs fieldSpecsFromFieldParam(MethodParameterInfo paramInfo, PropertyNamingStrategy namingStrategy) {
+        return new FieldSpecs(paramInfo, namingStrategy);
     }
 
     protected static class FieldSpecs {
 
         final String fieldName;
         final String jsonName;
+        final boolean hasExplicitJsonName;
+        final String[] aliases;
         final Type fieldType;
 
         private final Map<String, AnnotationInstance> annotations = new HashMap<>();
@@ -277,14 +473,18 @@ public abstract class JacksonCodeGenerator {
         FieldInfo fieldInfo;
 
         FieldSpecs(FieldInfo fieldInfo) {
-            this(null, fieldInfo, null);
+            this(null, fieldInfo, null, null);
+        }
+
+        FieldSpecs(FieldInfo fieldInfo, PropertyNamingStrategy namingStrategy) {
+            this(null, fieldInfo, null, namingStrategy);
         }
 
         FieldSpecs(MethodInfo methodInfo) {
-            this(null, null, methodInfo);
+            this(null, null, methodInfo, null);
         }
 
-        FieldSpecs(MethodInfo constructor, FieldInfo fieldInfo, MethodInfo methodInfo) {
+        FieldSpecs(MethodInfo constructor, FieldInfo fieldInfo, MethodInfo methodInfo, PropertyNamingStrategy namingStrategy) {
             if (fieldInfo != null) {
                 this.fieldInfo = fieldInfo;
                 readAnnotations(fieldInfo);
@@ -295,14 +495,20 @@ public abstract class JacksonCodeGenerator {
             }
             this.fieldType = fieldType();
             this.fieldName = fieldName();
-            this.jsonName = jsonName(constructor);
+            JsonNameResult result = jsonName(constructor, namingStrategy);
+            this.jsonName = result.name;
+            this.hasExplicitJsonName = result.explicit;
+            this.aliases = jsonAliases();
         }
 
-        FieldSpecs(MethodParameterInfo paramInfo) {
+        FieldSpecs(MethodParameterInfo paramInfo, PropertyNamingStrategy namingStrategy) {
             readAnnotations(paramInfo);
             this.fieldType = paramInfo.type();
             this.fieldName = paramInfo.name();
-            this.jsonName = jsonName(null);
+            JsonNameResult result = jsonName(null, namingStrategy);
+            this.jsonName = result.name;
+            this.hasExplicitJsonName = result.explicit;
+            this.aliases = jsonAliases();
         }
 
         private void readAnnotations(AnnotationTarget target) {
@@ -323,8 +529,28 @@ public abstract class JacksonCodeGenerator {
             return methodInfo.returnType();
         }
 
-        private String jsonName(MethodInfo constructor) {
+        private String[] jsonAliases() {
+            AnnotationInstance jsonAlias = annotations.get(JsonAlias.class.getName());
+            if (jsonAlias != null) {
+                AnnotationValue value = jsonAlias.value();
+                if (value != null) {
+                    return value.asStringArray();
+                }
+            }
+            return new String[0];
+        }
+
+        private record JsonNameResult(String name, boolean explicit) {
+        }
+
+        private JsonNameResult jsonName(MethodInfo constructor, PropertyNamingStrategy namingStrategy) {
             AnnotationInstance jsonProperty = annotations.get(JsonProperty.class.getName());
+            if (jsonProperty == null) {
+                jsonProperty = annotations.get(JsonGetter.class.getName());
+            }
+            if (jsonProperty == null) {
+                jsonProperty = annotations.get(JsonSetter.class.getName());
+            }
             if (jsonProperty == null && constructor != null) {
                 jsonProperty = constructor.parameters().stream()
                         .filter(parameter -> parameter.name().equals(fieldName)).findFirst()
@@ -335,10 +561,13 @@ public abstract class JacksonCodeGenerator {
             if (jsonProperty != null) {
                 AnnotationValue value = jsonProperty.value();
                 if (value != null && !value.asString().isEmpty()) {
-                    return value.asString();
+                    return new JsonNameResult(value.asString(), true);
                 }
             }
-            return fieldName;
+            if (namingStrategy != null) {
+                return new JsonNameResult(namingStrategy.nameForField(null, null, fieldName), true);
+            }
+            return new JsonNameResult(fieldName, false);
         }
 
         private String fieldName() {
@@ -359,21 +588,63 @@ public abstract class JacksonCodeGenerator {
             return methodName;
         }
 
-        boolean hasUnknownAnnotation() {
-            return annotations.keySet().stream().anyMatch(FieldSpecs::isUnknownAnnotation);
-        }
-
         boolean isIgnoredField() {
             return annotations.get(JsonIgnore.class.getName()) != null;
         }
 
-        private static boolean isUnknownAnnotation(String ann) {
+        boolean isUnwrapped() {
+            return annotations.get(JsonUnwrapped.class.getName()) != null;
+        }
+
+        boolean isBackReference() {
+            return annotations.get(JsonBackReference.class.getName()) != null;
+        }
+
+        boolean isRawValue() {
+            return annotations.get(JsonRawValue.class.getName()) != null;
+        }
+
+        boolean isFormatShapeNumber() {
+            AnnotationInstance format = annotations.get(JsonFormat.class.getName());
+            if (format == null) {
+                return false;
+            }
+            AnnotationValue shape = format.value("shape");
+            return shape != null && "NUMBER".equals(shape.asEnum());
+        }
+
+        String jsonIncludeValue() {
+            AnnotationInstance include = annotations.get(JsonInclude.class.getName());
+            if (include == null || include.value() == null) {
+                return null;
+            }
+            String includeValue = include.value().asEnum();
+            return switch (includeValue) {
+                case "NON_NULL" -> "NON_NULL";
+                case "NON_EMPTY" -> "NON_EMPTY";
+                case "NON_ABSENT" -> "NON_ABSENT";
+                default -> null;
+            };
+        }
+
+        static boolean isUnknownAnnotation(String ann) {
             if (ann.startsWith("com.fasterxml.jackson.")) {
-                return !ann.equals(JsonProperty.class.getName()) &&
-                        !ann.equals(JsonIgnore.class.getName()) &&
-                        !ann.equals(JsonCreator.class.getName());
+                return !SUPPORTED_JACKSON_ANNOTATIONS.contains(ann);
             }
             return ann.startsWith("jakarta.persistence.");
+        }
+
+        String[] viewClasses() {
+            AnnotationInstance jsonView = annotations.get(JsonView.class.getName());
+            if (jsonView == null || jsonView.value() == null) {
+                return null;
+            }
+            Type[] types = jsonView.value().asClassArray();
+            String[] classNames = new String[types.length];
+            for (int i = 0; i < types.length; i++) {
+                classNames[i] = types[i].name().toString();
+            }
+            return classNames;
         }
 
         ResultHandle toValueWriterHandle(BytecodeCreator bytecode, ResultHandle valueHandle) {

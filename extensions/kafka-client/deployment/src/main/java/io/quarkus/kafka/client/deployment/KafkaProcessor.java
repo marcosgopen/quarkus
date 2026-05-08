@@ -51,6 +51,7 @@ import io.quarkus.deployment.annotations.Consume;
 import io.quarkus.deployment.annotations.ExecutionTime;
 import io.quarkus.deployment.annotations.Record;
 import io.quarkus.deployment.builditem.AdditionalIndexedClassesBuildItem;
+import io.quarkus.deployment.builditem.BytecodeTransformerBuildItem;
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem;
 import io.quarkus.deployment.builditem.ConfigDescriptionBuildItem;
 import io.quarkus.deployment.builditem.ExtensionSslNativeSupportBuildItem;
@@ -74,7 +75,6 @@ import io.quarkus.deployment.builditem.nativeimage.ServiceProviderBuildItem;
 import io.quarkus.deployment.logging.LogCleanupFilterBuildItem;
 import io.quarkus.deployment.pkg.builditem.CurateOutcomeBuildItem;
 import io.quarkus.deployment.pkg.steps.NativeImageFutureDefault;
-import io.quarkus.deployment.pkg.steps.NativeOrNativeSourcesBuild;
 import io.quarkus.kafka.client.runtime.KafkaAdminClient;
 import io.quarkus.kafka.client.runtime.KafkaBindingConverter;
 import io.quarkus.kafka.client.runtime.KafkaRecorder;
@@ -162,6 +162,21 @@ public class KafkaProcessor {
     }
 
     @BuildStep
+    void removeAppInfoJmxRegistration(KafkaBuildTimeConfig config,
+            BuildProducer<BytecodeTransformerBuildItem> transformers,
+            BuildProducer<RunTimeConfigurationDefaultBuildItem> runtimeConfig) {
+        if (config.jmxEnabled()) {
+            return;
+        }
+        transformers.produce(new BytecodeTransformerBuildItem.Builder()
+                .setClassToTransform("org.apache.kafka.common.utils.AppInfoParser")
+                .setCacheable(true)
+                .setVisitorFunction((className, classVisitor) -> new AppInfoClassVisitor(classVisitor))
+                .build());
+        runtimeConfig.produce(new RunTimeConfigurationDefaultBuildItem("kafka.metric.reporters", ""));
+    }
+
+    @BuildStep
     void silenceUnwantedConfigLogs(BuildProducer<LogCleanupFilterBuildItem> logCleanupFilters) {
         String[] ignoredConfigProperties = { "wildfly.sasl.relax-compliance", "ssl.endpoint.identification.algorithm" };
 
@@ -222,6 +237,7 @@ public class KafkaProcessor {
             CombinedIndexBuildItem indexBuildItem,
             BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
             BuildProducer<ReflectiveMethodBuildItem> reflectiveMethod,
+            BuildProducer<ReflectiveClassConditionBuildItem> reflectiveClassCondition,
             BuildProducer<ServiceProviderBuildItem> serviceProviders,
             BuildProducer<NativeImageProxyDefinitionBuildItem> proxies,
             Capabilities capabilities,
@@ -249,9 +265,11 @@ public class KafkaProcessor {
                 .reason(getClass().getName() + " OAuthBearerSaslClient classes")
                 .build());
 
-        // This is done to avoid loading jose4j classes when not needed, as DefaultJwtValidator is the default validator used by Kafka clients if no other validator is specified.
-        reflectiveMethod.produce(new ReflectiveMethodBuildItem(getClass().getName() + " DefaultJwtValidator class",
-                DefaultJwtValidator.class.getName(), "<init>", new String[0]));
+        // Register DefaultJwtValidator only when jose4j is present to avoid NoClassDefFoundError
+        // with GraalVM 25's --future-defaults=complete-reflection-types flag
+        reflectiveClassCondition.produce(new ReflectiveClassConditionBuildItem(
+                DefaultJwtValidator.class.getName(),
+                "org.jose4j.keys.resolvers.VerificationKeyResolver"));
 
         for (Class<?> i : BUILT_INS) {
             reflectiveClass.produce(ReflectiveClassBuildItem.builder(i.getName())
@@ -305,14 +323,13 @@ public class KafkaProcessor {
                 "The tls-configuration to use for the Kafka client", null, null, ConfigPhase.RUN_TIME));
     }
 
-    @BuildStep(onlyIf = { HasSnappy.class, NativeOrNativeSourcesBuild.class })
-    public void handleSnappyInNative(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
+    @BuildStep(onlyIf = HasSnappy.class)
+    public void handleSnappyReflection(BuildProducer<ReflectiveClassBuildItem> reflectiveClass,
             BuildProducer<NativeImageFeatureBuildItem> feature) {
         reflectiveClass.produce(ReflectiveClassBuildItem.builder("org.xerial.snappy.SnappyInputStream",
                 "org.xerial.snappy.SnappyOutputStream")
                 .reason(getClass().getName() + " snappy support")
                 .methods().fields().build());
-
         feature.produce(new NativeImageFeatureBuildItem(SnappyFeature.class));
     }
 

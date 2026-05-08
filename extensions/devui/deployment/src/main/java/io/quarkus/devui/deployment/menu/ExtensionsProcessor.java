@@ -28,11 +28,20 @@ import io.quarkus.devui.deployment.InternalPageBuildItem;
 import io.quarkus.devui.deployment.extension.Extension;
 import io.quarkus.devui.deployment.extension.ExtensionGroup;
 import io.quarkus.devui.spi.buildtime.BuildTimeActionBuildItem;
+import io.quarkus.devui.spi.buildtime.DevMcpBuildTimeTool;
+import io.quarkus.devui.spi.buildtime.DevMcpParam;
 import io.quarkus.devui.spi.page.Page;
 
 /**
  * This creates Extensions Page
  */
+@DevMcpBuildTimeTool(name = "listInstallableExtensions", description = "Get all extensions that can be added to the current project")
+@DevMcpBuildTimeTool(name = "removeExtension", description = "Remove a certain extension from the current project", params = {
+        @DevMcpParam(name = "extensionArtifactId", description = "The gav string of the extension to remove in format groupId:artifactId:version")
+})
+@DevMcpBuildTimeTool(name = "addExtension", description = "Add a certain extension to the current project", params = {
+        @DevMcpParam(name = "extensionArtifactId", description = "The gav string of the extension to add in format groupId:artifactId:version")
+})
 public class ExtensionsProcessor {
 
     @BuildStep(onlyIf = IsLocalDevelopment.class)
@@ -137,7 +146,7 @@ public class ExtensionsProcessor {
                         return filtered;
                     });
                 })
-                .enableMcpFuctionByDefault()
+                .enableMcpFunctionByDefault()
                 .build();
     }
 
@@ -221,7 +230,7 @@ public class ExtensionsProcessor {
                         }
                     });
                 })
-                .enableMcpFuctionByDefault()
+                .enableMcpFunctionByDefault()
                 .build();
     }
 
@@ -247,7 +256,7 @@ public class ExtensionsProcessor {
                         }
                     });
                 })
-                .enableMcpFuctionByDefault()
+                .enableMcpFunctionByDefault()
                 .build();
     }
 

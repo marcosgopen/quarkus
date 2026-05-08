@@ -207,6 +207,7 @@
                 <module>hibernate-orm-compatibility-5.6/mariadb</module>
                 <module>hibernate-orm-compatibility-5.6/postgresql</module>
                 <module>hibernate-orm-panache</module>
+                <module>hibernate-panache-next</module>
                 <module>hibernate-orm-rest-data-panache</module>
                 <module>hibernate-orm-graphql-panache</module>
                 <module>hibernate-orm-panache-kotlin</module>
@@ -232,6 +233,7 @@
                 <module>hibernate-orm-panache-data</module>
                 <module>hibernate-orm-envers</module>
                 <module>hibernate-orm-spatial</module>
+                <module>hibernate-orm-vector</module>
                 <module>vertx-http</module>
                 <module>vertx-http-compressors</module>
                 <module>vertx-web</module>
@@ -285,7 +287,7 @@
                 <module>reactive-mysql-client</module>
                 <module>reactive-mssql-client</module>
                 <module>reactive-oracle-client</module>
-<!--   disabled because of incremental build problems             <module>devservices</module>-->
+                <module>devservices</module>
                 <module>test-extension</module>
                 <module>amazon-lambda</module>
                 <module>amazon-lambda-s3event</module>

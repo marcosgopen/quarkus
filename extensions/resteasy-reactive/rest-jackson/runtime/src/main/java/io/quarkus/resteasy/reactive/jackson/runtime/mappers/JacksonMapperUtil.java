@@ -4,17 +4,23 @@ import java.io.IOException;
 import java.lang.reflect.Array;
 import java.lang.reflect.Type;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.SerializableString;
 import com.fasterxml.jackson.databind.BeanProperty;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.PropertyNamingStrategy;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.util.NameTransformer;
 
 import io.quarkus.arc.Arc;
 import io.quarkus.arc.ArcContainer;
@@ -23,6 +29,18 @@ import io.quarkus.resteasy.reactive.jackson.runtime.security.RolesAllowedConfigE
 import io.quarkus.security.identity.SecurityIdentity;
 
 public class JacksonMapperUtil {
+
+    public static boolean isViewIncluded(Class<?> activeView, Class<?>[] viewClasses) {
+        if (activeView == null) {
+            return true;
+        }
+        for (Class<?> viewClass : viewClasses) {
+            if (viewClass.isAssignableFrom(activeView)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public static boolean includeSecureField(SerializerProvider serializerProvider, String[] rolesAllowed) {
         return serializerProvider.getConfig().getFilterProvider() == null || includeSecureField(rolesAllowed);
@@ -54,6 +72,34 @@ public class JacksonMapperUtil {
             }
         }
         return false;
+    }
+
+    /**
+     * Writes a field name to the JSON generator, translating through the ObjectMapper's
+     * {@link PropertyNamingStrategy} if one is configured.
+     * When no strategy is set, the pre-encoded {@code defaultName} is used for zero overhead.
+     */
+    public static void writeFieldName(JsonGenerator gen, PropertyNamingStrategy strategy,
+            String javaFieldName, SerializableString defaultName) throws IOException {
+        if (strategy == null) {
+            gen.writeFieldName(defaultName);
+        } else {
+            gen.writeFieldName(strategy.nameForField(null, null, javaFieldName));
+        }
+    }
+
+    /**
+     * Builds a reverse-translation index mapping strategy-translated JSON field names back to
+     * Java field names. Called once at the start of deserialization so that per-field lookups
+     * are O(1) via {@link Map#getOrDefault} instead of O(n) scans.
+     */
+    public static Map<String, String> buildReverseNameIndex(PropertyNamingStrategy strategy,
+            String[] translatableFieldNames) {
+        Map<String, String> index = new HashMap<>();
+        for (String javaName : translatableFieldNames) {
+            index.put(strategy.nameForField(null, null, javaName), javaName);
+        }
+        return index;
     }
 
     /**
@@ -119,22 +165,86 @@ public class JacksonMapperUtil {
         JavaType wrapperType = property != null ? property.getType() : context.getContextualType();
         JavaType[] valueTypes = new JavaType[wrapperType.containedTypeCount()];
         for (int i = 0; i < valueTypes.length; i++) {
-            valueTypes[i] = wrapperType.containedType(0);
+            valueTypes[i] = wrapperType.containedType(i);
         }
         return valueTypes;
     }
 
     public static void serializePojo(Object value, JsonGenerator generator, SerializerProvider serializerProvider)
             throws IOException {
+        serializePojo(value, null, generator, serializerProvider);
+    }
+
+    public static void serializePojo(Object value, Object bean, JsonGenerator generator,
+            SerializerProvider serializerProvider) throws IOException {
         if (value == null || value instanceof Map) {
             generator.writePOJO(value);
             return;
         }
-        JsonSerializer<Object> serializer = serializerProvider.findValueSerializer(value.getClass());
+        if (value == bean && handleSelfReference(bean, generator, serializerProvider)) {
+            return;
+        }
+        JsonSerializer<Object> serializer = serializerProvider.findTypedValueSerializer(value.getClass(), true, null);
         if (serializer != null) {
             serializer.serialize(value, generator, serializerProvider);
         } else {
             generator.writePOJO(value);
+        }
+    }
+
+    private static boolean handleSelfReference(Object bean, JsonGenerator generator,
+            SerializerProvider serializerProvider) throws IOException {
+        if (!serializerProvider.isEnabled(SerializationFeature.FAIL_ON_SELF_REFERENCES)) {
+            return false;
+        }
+        if (serializerProvider.isEnabled(SerializationFeature.WRITE_SELF_REFERENCES_AS_NULL)) {
+            generator.writeNull();
+            return true;
+        }
+        throw JsonMappingException.from(generator,
+                "Direct self-reference leading to cycle (through reference chain: " + bean.getClass().getName() + ")");
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void serializeCollection(Object value, Class<?> collectionClass, Class<?> elementClass,
+            JsonGenerator generator, SerializerProvider serializerProvider) throws IOException {
+        if (value == null) {
+            generator.writeNull();
+            return;
+        }
+        JavaType collectionType = serializerProvider.getTypeFactory()
+                .constructCollectionType((Class<? extends Collection>) collectionClass, elementClass);
+        JsonSerializer<Object> serializer = serializerProvider.findValueSerializer(collectionType);
+        serializer.serialize(value, generator, serializerProvider);
+    }
+
+    public static void serializeUnwrapped(Object value, JsonGenerator generator,
+            SerializerProvider serializerProvider) throws IOException {
+        if (value == null) {
+            return;
+        }
+        JsonSerializer<Object> serializer = serializerProvider.findValueSerializer(value.getClass());
+        if (serializer instanceof GeneratedSerializer gs) {
+            gs.serializeContent(value, generator, serializerProvider);
+        } else {
+            serializer.unwrappingSerializer(NameTransformer.NOP)
+                    .serialize(value, generator, serializerProvider);
+        }
+    }
+
+    public static void serializeAnyGetterMap(Map<?, ?> map, JsonGenerator generator,
+            SerializerProvider serializerProvider) throws IOException {
+        if (map == null) {
+            return;
+        }
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            generator.writeFieldName(String.valueOf(entry.getKey()));
+            Object value = entry.getValue();
+            if (value == null) {
+                generator.writeNull();
+            } else {
+                serializePojo(value, null, generator, serializerProvider);
+            }
         }
     }
 

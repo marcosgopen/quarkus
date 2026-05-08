@@ -2,10 +2,15 @@ package io.quarkus.oidc.client;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import java.util.function.Consumer;
+import java.util.logging.LogRecord;
+import java.util.stream.Collectors;
 
 import jakarta.enterprise.context.ApplicationScoped;
 
@@ -20,7 +25,7 @@ import io.quarkus.credentials.CredentialsProvider;
 import io.quarkus.deployment.builditem.MainBytecodeRecorderBuildItem;
 import io.quarkus.deployment.recording.BytecodeRecorderImpl;
 import io.quarkus.runtime.annotations.Recorder;
-import io.quarkus.test.QuarkusUnitTest;
+import io.quarkus.test.QuarkusExtensionTest;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.restassured.RestAssured;
 
@@ -36,11 +41,13 @@ public class OidcClientCredentialsJwtSecretTestCase {
     };
 
     @RegisterExtension
-    static final QuarkusUnitTest test = new QuarkusUnitTest()
+    static final QuarkusExtensionTest test = new QuarkusExtensionTest()
             .withApplicationRoot((jar) -> jar
                     .addClasses(testClasses)
                     .addAsResource("application-oidc-client-credentials-jwt-secret.properties", "application.properties"))
-            .addBuildChainCustomizer(buildCustomizer());
+            .addBuildChainCustomizer(buildCustomizer())
+            .setLogRecordPredicate(r -> true)
+            .assertLogRecords(r -> assertLogRecord(r));
 
     @Test
     public void testGetTokenJwtClient() {
@@ -115,5 +122,13 @@ public class OidcClientCredentialsJwtSecretTestCase {
                 }).produces(MainBytecodeRecorderBuildItem.class).produces(SyntheticBeanBuildItem.class).build();
             }
         };
+    }
+
+    private static void assertLogRecord(List<LogRecord> records) {
+        List<LogRecord> clientSecretRecords = records.stream()
+                .filter(r -> r.getMessage().contains("client_assertion=")).collect(Collectors.toList());
+        assertFalse(clientSecretRecords.isEmpty());
+
+        assertTrue(clientSecretRecords.stream().allMatch(r -> r.getMessage().contains("client_assertion=...")));
     }
 }
